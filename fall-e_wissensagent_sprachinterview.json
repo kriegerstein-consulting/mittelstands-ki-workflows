@@ -1,0 +1,232 @@
+{
+  "name": "Fall E - Wissensagent (Sprachinterview)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "wissensagent",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -80,
+        0
+      ],
+      "id": "d9159613-9817-4193-8724-e4b393ef9be3",
+      "name": "Webhook"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Hier das Transcript des Calls. Führe dein System Prompt darauf aus: {{ $json.transcript }}",
+        "options": {
+          "systemMessage": "Du bist ein Experte für Wissensdokumentation. Du erhältst das Transkript eines Experteninterviews (deutsch oder englisch) zwischen einem KI-Agenten (Rick) und einem Mitarbeiter.\\n\\nDeine Aufgabe: Erstelle daraus eine strukturierte How-To-Anleitung als JSON in der Sprache des gehaltenen Interviews.\\n\\nRegeln:\\n- Extrahiere NUR was der Mitarbeiter tatsächlich gesagt hat\\n- Erfinde keine Schritte oder Details\\n- Wenn etwas unklar ist, markiere es mit [UNKLAR: ...]\\n- Gib NUR valides JSON zurück, kein Markdown, keine Backticks\\n\\nJSON-Schema:\\n{\\\"title\\\":\\\"string\\\",\\\"goal\\\":\\\"string\\\",\\\"duration_minutes\\\":0,\\\"prerequisites\\\":[\\\"string\\\"],\\\"steps\\\":[{\\\"step_number\\\":1,\\\"title\\\":\\\"string\\\",\\\"description\\\":\\\"string\\\",\\\"tools\\\":[\\\"string\\\"],\\\"pitfalls\\\":[\\\"string\\\"]}],\\\"edge_cases\\\":[{\\\"situation\\\":\\\"string\\\",\\\"solution\\\":\\\"string\\\"}],\\\"contacts\\\":[\\\"string\\\"],\\\"tags\\\":[\\\"string\\\"]} "
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        336,
+        0
+      ],
+      "id": "73285b91-ca61-479b-9c87-27f42b287547",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "claude-sonnet-4-5-20250929",
+          "cachedResultName": "Claude Sonnet 4.5"
+        },
+        "options": {
+          "maxTokensToSample": 4096,
+          "temperature": 0.3
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        256,
+        208
+      ],
+      "id": "015084ff-b6e0-4bf8-ac89-da44a1f0653e",
+      "name": "Anthropic Chat Model",
+      "credentials": {
+        "anthropicApi": {
+          "id": "dJO0wfHtA0d8q0xA",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map(item => {\n  const messages = item.json.body.message.artifact.messages;\n\n  const formatted = messages\n    .filter(m => m.role === 'user' || m.role === 'bot')\n    .map(m => ({\n      role: m.role === 'bot' ? 'assistant' : 'user',\n      content: m.message\n    }));\n\n  // Zusätzlich: Volltext-Transkript für Claude\n  const transcript = messages\n    .filter(m => m.role === 'user' || m.role === 'bot')\n    .map(m => `${m.role === 'bot' ? 'Maja' : 'Mitarbeiter'}: ${m.message}`)\n    .join('\\n');\n\n  return {\n    json: {\n      conversation: formatted,\n      transcript,                                         // <-- neu\n      call_id: item.json.body.message.call?.id,          // <-- neu\n      duration: item.json.body.message.durationSeconds   // <-- neu\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        128,
+        0
+      ],
+      "id": "0ae98db3-ce40-4bb2-b2ee-985974fa6aed",
+      "name": "Vapi Agent parsen"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// KI Agent parsen — robust\n// ============================================================\n\nconst item = $input.first().json;\n\n// 1) Output kann string oder bereits Objekt sein\nlet raw = item.output ?? item.text ?? item;\nif (typeof raw === 'object') {\n  return [{ json: normalize(raw) }];\n}\nraw = String(raw);\n\n// 2) Markdown-Codefences entfernen (```json ... ``` oder ``` ... ```)\nlet cleaned = raw\n  .replace(/^\\s*```(?:json|JSON)?\\s*\\n?/g, '')\n  .replace(/\\n?```\\s*$/g, '')\n  .trim();\n\n// 3) Ersten {...}-Block finden (greedy, ueber Newlines hinweg)\n//    — fängt Faelle ab, in denen Hinweistext vor/nach dem JSON steht\nconst block = extractJsonBlock(cleaned);\nif (!block) {\n  throw new Error(\n    'Kein JSON-Objekt im LLM-Output gefunden. Erste 200 Zeichen:\\n' +\n      cleaned.slice(0, 200),\n  );\n}\n\n// 4) Typische LLM-Macken vor dem Parsen reparieren\nconst repaired = block\n  // smart quotes -> straight quotes\n  .replace(/[\\u201C\\u201D]/g, '\"')\n  .replace(/[\\u2018\\u2019]/g, \"'\")\n  // trailing commas in objects/arrays\n  .replace(/,(\\s*[}\\]])/g, '$1');\n\nlet parsed;\ntry {\n  parsed = JSON.parse(repaired);\n} catch (err) {\n  throw new Error(\n    `JSON.parse fehlgeschlagen: ${err.message}\\n\\nRepariert (erste 500 Zeichen):\\n${repaired.slice(0, 500)}`,\n  );\n}\n\nreturn [{ json: normalize(parsed) }];\n\n// ============================================================\n// Helpers\n// ============================================================\n\n// Findet den ersten ausbalancierten {...}-Block, ignoriert {}/[] in Strings\nfunction extractJsonBlock(s) {\n  const start = s.indexOf('{');\n  if (start < 0) return null;\n\n  let depth = 0;\n  let inString = false;\n  let escape = false;\n\n  for (let i = start; i < s.length; i++) {\n    const ch = s[i];\n\n    if (escape) { escape = false; continue; }\n    if (ch === '\\\\' && inString) { escape = true; continue; }\n    if (ch === '\"') { inString = !inString; continue; }\n    if (inString) continue;\n\n    if (ch === '{') depth++;\n    else if (ch === '}') {\n      depth--;\n      if (depth === 0) return s.slice(start, i + 1);\n    }\n  }\n\n  return null;\n}\n\n// Stellt sicher, dass alle erwarteten Felder existieren — verhindert,\n// dass die Word-Generator-Node abschmiert wenn das LLM Felder weglaesst\nfunction normalize(obj) {\n  return {\n    title: str(obj.title) || 'Unbenannte Anleitung',\n    goal: str(obj.goal) || '',\n    duration_minutes: Number.isFinite(+obj.duration_minutes) ? +obj.duration_minutes : 0,\n    prerequisites: arr(obj.prerequisites).map(str).filter(Boolean),\n    steps: arr(obj.steps).map((s, i) => ({\n      step_number: Number.isFinite(+s?.step_number) ? +s.step_number : i + 1,\n      title: str(s?.title) || `Schritt ${i + 1}`,\n      description: str(s?.description) || '',\n      tools: arr(s?.tools).map(str).filter(Boolean),\n      pitfalls: arr(s?.pitfalls).map(str).filter(Boolean),\n    })),\n    edge_cases: arr(obj.edge_cases).map((e) => ({\n      situation: str(e?.situation) || '',\n      solution: str(e?.solution) || '',\n    })),\n    contacts: arr(obj.contacts).map(str).filter(Boolean),\n    tags: arr(obj.tags).map(str).filter(Boolean),\n  };\n}\n\nfunction str(v) {\n  if (v == null) return '';\n  if (typeof v === 'string') return v.trim();\n  return String(v);\n}\n\nfunction arr(v) {\n  return Array.isArray(v) ? v : [];\n}\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        656,
+        0
+      ],
+      "id": "8d3f67d3-7f21-46a5-acbf-f7604fbb1419",
+      "name": "KI Agent parsen"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================================\n// How-To → DOCX (ein Code Node, kein externer Service)\n// =====================================================================\n\nfunction xmlEscape(s) {\n  return String(s || '')\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;')\n    .replace(/\"/g, '&quot;')\n    .replace(/'/g, '&apos;');\n}\n\nfunction textToRuns(text, runProps) {\n  if (!text) return '<w:r>' + runProps + '<w:t xml:space=\"preserve\"></w:t></w:r>';\n  return String(text).split(/\\r?\\n/).map(function(line, i) {\n    if (i === 0) return '<w:r>' + runProps + '<w:t xml:space=\"preserve\">' + xmlEscape(line) + '</w:t></w:r>';\n    return '<w:br/><w:r>' + runProps + '<w:t xml:space=\"preserve\">' + xmlEscape(line) + '</w:t></w:r>';\n  }).join('');\n}\n\nfunction para(opts) {\n  var text         = opts.text || '';\n  var font         = opts.font || 'Arial';\n  var size         = opts.size || 22;\n  var color        = opts.color || '1a1a1a';\n  var bold         = opts.bold || false;\n  var italics      = opts.italics || false;\n  var allCaps      = opts.allCaps || false;\n  var alignment    = opts.alignment || null;\n  var spacingBefore= opts.spacingBefore || 0;\n  var spacingAfter = opts.spacingAfter !== undefined ? opts.spacingAfter : 120;\n  var spacingLine  = opts.spacingLine || 0;\n  var borderLeft   = opts.borderLeft || null;\n  var borderTop    = opts.borderTop || null;\n  var borderBottom = opts.borderBottom || null;\n  var indentLeft   = opts.indentLeft || 0;\n\n  var pPrParts = [];\n  var borders = [];\n  if (borderTop)    borders.push('<w:top    w:val=\"single\" w:sz=\"' + borderTop.size    + '\" w:space=\"' + (borderTop.space    || 1) + '\" w:color=\"' + borderTop.color    + '\"/>');\n  if (borderBottom) borders.push('<w:bottom w:val=\"single\" w:sz=\"' + borderBottom.size + '\" w:space=\"' + (borderBottom.space || 1) + '\" w:color=\"' + borderBottom.color + '\"/>');\n  if (borderLeft)   borders.push('<w:left   w:val=\"single\" w:sz=\"' + borderLeft.size   + '\" w:space=\"' + (borderLeft.space   || 4) + '\" w:color=\"' + borderLeft.color   + '\"/>');\n  if (borders.length) pPrParts.push('<w:pBdr>' + borders.join('') + '</w:pBdr>');\n\n  var spacingAtts = [];\n  if (spacingBefore) spacingAtts.push('w:before=\"' + spacingBefore + '\"');\n  if (spacingAfter)  spacingAtts.push('w:after=\"'  + spacingAfter  + '\"');\n  if (spacingLine)   spacingAtts.push('w:line=\"'   + spacingLine   + '\" w:lineRule=\"auto\"');\n  if (spacingAtts.length) pPrParts.push('<w:spacing ' + spacingAtts.join(' ') + '/>');\n\n  if (indentLeft) pPrParts.push('<w:ind w:left=\"' + indentLeft + '\"/>');\n  if (alignment)  pPrParts.push('<w:jc w:val=\"' + alignment + '\"/>');\n\n  var rPrParts = [];\n  rPrParts.push('<w:rFonts w:ascii=\"' + font + '\" w:hAnsi=\"' + font + '\" w:cs=\"' + font + '\"/>');\n  if (bold)    rPrParts.push('<w:b/>');\n  if (italics) rPrParts.push('<w:i/>');\n  if (allCaps) rPrParts.push('<w:caps/>');\n  rPrParts.push('<w:color w:val=\"' + color + '\"/>');\n  rPrParts.push('<w:sz w:val=\"' + size + '\"/>');\n  rPrParts.push('<w:szCs w:val=\"' + size + '\"/>');\n\n  var runProps = '<w:rPr>' + rPrParts.join('') + '</w:rPr>';\n  var pPr = pPrParts.length\n    ? '<w:pPr>' + pPrParts.join('') + '<w:rPr>' + rPrParts.join('') + '</w:rPr></w:pPr>'\n    : '';\n\n  return '<w:p>' + pPr + textToRuns(text, runProps) + '</w:p>';\n}\n\nfunction bulletItem(text, font) {\n  font = font || 'Arial';\n  return '<w:p>' +\n    '<w:pPr><w:spacing w:after=\"60\"/><w:ind w:left=\"360\" w:hanging=\"200\"/></w:pPr>' +\n    '<w:r><w:rPr>' +\n      '<w:rFonts w:ascii=\"' + font + '\" w:hAnsi=\"' + font + '\"/>' +\n      '<w:color w:val=\"555555\"/><w:sz w:val=\"20\"/>' +\n    '</w:rPr>' +\n    '<w:t xml:space=\"preserve\">\\u2013  ' + xmlEscape(text) + '</w:t></w:r>' +\n    '</w:p>';\n}\n\nfunction sectionLabel(text) {\n  return para({\n    text: text,\n    font: 'Arial', size: 17, bold: true, allCaps: true,\n    color: '185FA5',\n    spacingBefore: 280, spacingAfter: 80,\n  });\n}\n\nfunction emptyPara() {\n  return '<w:p><w:pPr><w:spacing w:after=\"0\"/></w:pPr></w:p>';\n}\n\nfunction buildDocumentXml(data) {\n  var today = new Date();\n  var months = ['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];\n  var dateStr = today.getDate() + '. ' + months[today.getMonth()] + ' ' + today.getFullYear();\n\n  var DARK  = '0c2340';\n  var BLUE  = '185FA5';\n  var GRAY  = '666666';\n\n  var parts = [];\n\n  // Titel\n  parts.push(para({\n    text: xmlEscape(data.title || 'How-To Anleitung'),\n    font: 'Arial', size: 40, bold: true, color: DARK,\n    spacingBefore: 200, spacingAfter: 80,\n  }));\n\n  // Meta\n  var metaParts = [];\n  if (data.duration_minutes) metaParts.push('Dauer: ca. ' + data.duration_minutes + ' Min.');\n  metaParts.push('Erstellt: ' + dateStr);\n  if (data.tags && data.tags.length) metaParts.push(data.tags.join(' \\u00b7 '));\n  parts.push(para({ text: metaParts.join('   |   '), font: 'Arial', size: 18, color: GRAY, spacingAfter: 320 }));\n\n  // Ziel\n  parts.push(para({\n    text: 'ZIEL',\n    font: 'Arial', size: 16, bold: true, allCaps: true, color: BLUE,\n    spacingAfter: 40,\n    borderLeft: { color: BLUE, size: 16, space: 12 },\n    indentLeft: 200,\n  }));\n  parts.push(para({\n    text: xmlEscape(data.goal || ''),\n    font: 'Arial', size: 22, color: '222222',\n    spacingAfter: 360, spacingLine: 340,\n    borderLeft: { color: BLUE, size: 16, space: 12 },\n    indentLeft: 200,\n  }));\n\n  // Voraussetzungen\n  if (data.prerequisites && data.prerequisites.length) {\n    parts.push(sectionLabel('Voraussetzungen'));\n    data.prerequisites.forEach(function(p) { parts.push(bulletItem(p)); });\n    parts.push(emptyPara());\n  }\n\n  // Schritte\n  parts.push(sectionLabel('Schritte'));\n  if (!data.steps || !data.steps.length) {\n    parts.push(para({ text: 'Keine Schritte erfasst.', color: '999999', italics: true }));\n  } else {\n    data.steps.forEach(function(step, idx) {\n      parts.push(para({\n        text: (step.step_number || idx + 1) + '.  ' + xmlEscape(step.title || ''),\n        font: 'Arial', size: 24, bold: true, color: DARK,\n        spacingBefore: idx === 0 ? 0 : 240, spacingAfter: 60,\n      }));\n      if (step.description) {\n        parts.push(para({\n          text: xmlEscape(step.description),\n          font: 'Arial', size: 22, color: '222222',\n          spacingAfter: 80, spacingLine: 320, indentLeft: 280,\n        }));\n      }\n      if (step.tools && step.tools.length) {\n        parts.push(para({\n          text: 'Tools: ' + step.tools.map(function(t) { return xmlEscape(t); }).join(', '),\n          font: 'Arial', size: 18, color: GRAY, italics: true,\n          spacingAfter: 60, indentLeft: 280,\n        }));\n      }\n      if (step.pitfalls && step.pitfalls.length) {\n        step.pitfalls.forEach(function(pf) {\n          parts.push(para({\n            text: 'Achtung: ' + xmlEscape(pf),\n            font: 'Arial', size: 18, color: 'b45309',\n            spacingAfter: 60, indentLeft: 280,\n            borderLeft: { color: 'f0c040', size: 12, space: 10 },\n          }));\n        });\n      }\n    });\n  }\n\n  // Sonderfälle\n  if (data.edge_cases && data.edge_cases.length) {\n    parts.push(emptyPara());\n    parts.push(sectionLabel('Sonderfälle'));\n    data.edge_cases.forEach(function(ec) {\n      parts.push(para({\n        text: xmlEscape(ec.situation || ''),\n        font: 'Arial', size: 22, bold: true, color: DARK,\n        spacingAfter: 40, spacingBefore: 120,\n      }));\n      parts.push(para({\n        text: xmlEscape(ec.solution || ''),\n        font: 'Arial', size: 22, color: '444444',\n        spacingAfter: 80, indentLeft: 280,\n        borderLeft: { color: 'cccccc', size: 10, space: 10 },\n      }));\n    });\n  }\n\n  // Ansprechpartner\n  if (data.contacts && data.contacts.length) {\n    parts.push(emptyPara());\n    parts.push(sectionLabel('Ansprechpartner'));\n    data.contacts.forEach(function(c) { parts.push(bulletItem(c)); });\n  }\n\n  // Footer-Linie\n  parts.push(para({\n    text: '',\n    spacingBefore: 480,\n    borderTop: { color: 'cccccc', size: 6, space: 12 },\n  }));\n  parts.push(para({\n    text: 'Erstellt mit dem Wissens-Agenten \\u00b7 Interne Dokumentation \\u00b7 Nicht zur Weitergabe',\n    font: 'Arial', size: 16, italics: true, color: 'aaaaaa',\n    spacingBefore: 80, spacingAfter: 0,\n  }));\n\n  var sectPr = '<w:sectPr>' +\n    '<w:pgSz w:w=\"11906\" w:h=\"16838\"/>' +\n    '<w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\"/>' +\n    '</w:sectPr>';\n\n  return '<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>' +\n    '<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">' +\n    '<w:body>' + parts.join('') + sectPr + '</w:body>' +\n    '</w:document>';\n}\n\n// ---------------------------------------------------------------------\n// ZIP-WRITER\n// ---------------------------------------------------------------------\n\nfunction crc32(buf) {\n  if (!crc32._t) {\n    crc32._t = new Uint32Array(256);\n    for (var i = 0; i < 256; i++) {\n      var c = i;\n      for (var k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);\n      crc32._t[i] = c >>> 0;\n    }\n  }\n  var crc = 0xFFFFFFFF;\n  for (var i = 0; i < buf.length; i++) crc = (crc >>> 8) ^ crc32._t[(crc ^ buf[i]) & 0xFF];\n  return (crc ^ 0xFFFFFFFF) >>> 0;\n}\n\nfunction buildZip(files) {\n  var now = new Date();\n  var dt = ((now.getHours() & 0x1F) << 11) | ((now.getMinutes() & 0x3F) << 5) | ((Math.floor(now.getSeconds() / 2)) & 0x1F);\n  var dd = (((now.getFullYear() - 1980) & 0x7F) << 9) | (((now.getMonth() + 1) & 0x0F) << 5) | (now.getDate() & 0x1F);\n\n  var localChunks = [], centralChunks = [], offset = 0;\n\n  files.forEach(function(f) {\n    var name = Buffer.from(f.name, 'utf-8');\n    var data = Buffer.isBuffer(f.data) ? f.data : Buffer.from(f.data, 'utf-8');\n    var crc  = crc32(data);\n\n    var local = Buffer.alloc(30 + name.length);\n    var p = 0;\n    local.writeUInt32LE(0x04034b50, p); p += 4;\n    local.writeUInt16LE(20, p); p += 2;\n    local.writeUInt16LE(0x0800, p); p += 2;\n    local.writeUInt16LE(0, p); p += 2;\n    local.writeUInt16LE(dt, p); p += 2;\n    local.writeUInt16LE(dd, p); p += 2;\n    local.writeUInt32LE(crc, p); p += 4;\n    local.writeUInt32LE(data.length, p); p += 4;\n    local.writeUInt32LE(data.length, p); p += 4;\n    local.writeUInt16LE(name.length, p); p += 2;\n    local.writeUInt16LE(0, p); p += 2;\n    name.copy(local, p);\n    localChunks.push(local);\n    localChunks.push(data);\n\n    var central = Buffer.alloc(46 + name.length);\n    p = 0;\n    central.writeUInt32LE(0x02014b50, p); p += 4;\n    central.writeUInt16LE(20, p); p += 2;\n    central.writeUInt16LE(20, p); p += 2;\n    central.writeUInt16LE(0x0800, p); p += 2;\n    central.writeUInt16LE(0, p); p += 2;\n    central.writeUInt16LE(dt, p); p += 2;\n    central.writeUInt16LE(dd, p); p += 2;\n    central.writeUInt32LE(crc, p); p += 4;\n    central.writeUInt32LE(data.length, p); p += 4;\n    central.writeUInt32LE(data.length, p); p += 4;\n    central.writeUInt16LE(name.length, p); p += 2;\n    central.writeUInt16LE(0, p); p += 2;\n    central.writeUInt16LE(0, p); p += 2;\n    central.writeUInt16LE(0, p); p += 2;\n    central.writeUInt16LE(0, p); p += 2;\n    central.writeUInt32LE(0, p); p += 4;\n    central.writeUInt32LE(offset, p); p += 4;\n    name.copy(central, p);\n    centralChunks.push(central);\n\n    offset += local.length + data.length;\n  });\n\n  var dir  = Buffer.concat(centralChunks);\n  var eocd = Buffer.alloc(22);\n  var p = 0;\n  eocd.writeUInt32LE(0x06054b50, p); p += 4;\n  eocd.writeUInt16LE(0, p); p += 2;\n  eocd.writeUInt16LE(0, p); p += 2;\n  eocd.writeUInt16LE(files.length, p); p += 2;\n  eocd.writeUInt16LE(files.length, p); p += 2;\n  eocd.writeUInt32LE(dir.length, p); p += 4;\n  eocd.writeUInt32LE(offset, p); p += 4;\n  eocd.writeUInt16LE(0, p); p += 2;\n\n  return Buffer.concat(localChunks.concat(centralChunks).concat([eocd]));\n}\n\n// ---------------------------------------------------------------------\n// DOCX ZUSAMMENBAUEN\n// ---------------------------------------------------------------------\n\nfunction buildDocx(data) {\n  var documentXml = buildDocumentXml(data);\n\n  var contentTypes = '<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>' +\n    '<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">' +\n    '<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>' +\n    '<Default Extension=\"xml\" ContentType=\"application/xml\"/>' +\n    '<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>' +\n    '<Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>' +\n    '</Types>';\n\n  var rels = '<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>' +\n    '<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">' +\n    '<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/>' +\n    '</Relationships>';\n\n  var documentRels = '<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>' +\n    '<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">' +\n    '<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>' +\n    '</Relationships>';\n\n  var styles = '<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>' +\n    '<w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">' +\n    '<w:docDefaults>' +\n    '<w:rPrDefault><w:rPr>' +\n    '<w:rFonts w:ascii=\"Arial\" w:hAnsi=\"Arial\" w:cs=\"Arial\"/>' +\n    '<w:sz w:val=\"22\"/><w:szCs w:val=\"22\"/>' +\n    '</w:rPr></w:rPrDefault>' +\n    '<w:pPrDefault><w:pPr>' +\n    '<w:spacing w:after=\"120\" w:line=\"300\" w:lineRule=\"auto\"/>' +\n    '</w:pPr></w:pPrDefault>' +\n    '</w:docDefaults>' +\n    '<w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\">' +\n    '<w:name w:val=\"Normal\"/><w:qFormat/>' +\n    '</w:style>' +\n    '</w:styles>';\n\n  return buildZip([\n    { name: '[Content_Types].xml',          data: contentTypes },\n    { name: '_rels/.rels',                  data: rels },\n    { name: 'word/_rels/document.xml.rels', data: documentRels },\n    { name: 'word/document.xml',            data: documentXml },\n    { name: 'word/styles.xml',              data: styles },\n  ]);\n}\n\n// ---------------------------------------------------------------------\n// n8n INTEGRATION\n// ---------------------------------------------------------------------\n\nvar input = $input.first().json;\nvar data = (typeof input.title === 'string') ? input : JSON.parse(input.output || '{}');\n\nvar docxBuffer = buildDocx(data);\n\nvar heute = new Date().toISOString().slice(0, 10);\nvar safeName = (data.title || 'how-to').replace(/[^a-z0-9]/gi, '_').slice(0, 40);\nvar filename = 'how_to_' + safeName + '_' + heute + '.docx';\n\nvar binaryData = await this.helpers.prepareBinaryData(\n  docxBuffer,\n  filename,\n  'application/vnd.openxmlformats-officedocument.wordprocessingml.document'\n);\n\nreturn [{ json: { filename: filename }, binary: { data: binaryData } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        0
+      ],
+      "id": "fa2381a1-7792-4570-97cd-18131b68d803",
+      "name": "Word erstellen"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://<ihr-frontend-host>/api/documents",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Webhook-Secret",
+              "value": "b5360d3c40f8e0f13c7311c549457995c4696c4af0ac9bdf"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "data"
+            },
+            {
+              "name": "filename",
+              "value": "={{ $json.filename }}"
+            },
+            {
+              "name": "title",
+              "value": "={{ $('KI Agent parsen').item.json.title }}"
+            },
+            {
+              "name": "call_id",
+              "value": "={{ $('Vapi Agent parsen').item.json.call_id }}"
+            },
+            {
+              "name": "duration",
+              "value": "={{ $('Vapi Agent parsen').item.json.duration }}"
+            },
+            {
+              "name": "owner_email",
+              "value": "={{ $('Webhook').item.json.body.message.call.assistantOverrides.metadata.ownerEmail }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1104,
+        0
+      ],
+      "id": "2a9671fc-c0c2-44b1-ac19-04617c8ecd8a",
+      "name": "HTTP Request"
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Vapi Agent parsen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "KI Agent parsen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vapi Agent parsen": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "KI Agent parsen": {
+      "main": [
+        [
+          {
+            "node": "Word erstellen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Word erstellen": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  }
+}

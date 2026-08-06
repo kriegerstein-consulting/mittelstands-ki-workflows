@@ -1,0 +1,565 @@
+{
+  "name": "Fall B - Newsletter- und LinkedIn-Generator (URL/Freitext)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "url-newsletter-generate",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "https://<ihr-frontend-host>"
+        }
+      },
+      "id": "cbdd111a-2b0f-45c3-9dd8-8fa9d6036a51",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1120,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// Node \"2. Inhalte abrufen\" - v4 mit verbesserter Block-Erkennung\n// (ohne Zeichen-Limit - nimmt den kompletten Text)\n// ============================================================\n// Strategie:\n//   1. Normaler Fetch                       (0 Credits)\n//   2. ScraperAPI + render=true             (10 Credits)\n//   3. ScraperAPI + render + ultra_premium  (75 Credits)\n// ============================================================\n\n// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n// >>> SCRAPERAPI KEY                                        <<<\n// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\nconst SCRAPERAPI_KEY = '8db4aed44f43124148e4d07e1b24fcfd';\n// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n\nconst params = $input.first().json;\n\n// --- Robuste Input-Normalisierung ---\nconst normalizeArray = (input) => {\n  if (input == null) return [];\n  if (Array.isArray(input)) return input;\n  if (typeof input === 'string') {\n    const trimmed = input.trim();\n    if (!trimmed) return [];\n    try {\n      const parsed = JSON.parse(trimmed);\n      if (Array.isArray(parsed)) return parsed;\n      if (typeof parsed === 'object' && parsed !== null) return [parsed];\n      return [];\n    } catch (e) {\n      return [{ url: trimmed, starred: false }];\n    }\n  }\n  if (typeof input === 'object') return [input];\n  return [];\n};\n\nconst normalizeUrlItem = (item) => {\n  if (typeof item === 'string') {\n    return { url: item, starred: false };\n  }\n  if (typeof item === 'object' && item !== null) {\n    return {\n      url: item.url || item.link || '',\n      starred: item.starred === true\n    };\n  }\n  return { url: '', starred: false };\n};\n\nconst urls = normalizeArray(params.urls).map(normalizeUrlItem);\nconst texts = normalizeArray(params.texts);\n\n// --- HTML zu Text (OHNE Laengen-Limit) ---\nconst htmlToText = (html) => {\n  if (typeof html !== 'string') return String(html);\n  return html\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, '')\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, '')\n    .replace(/<nav[\\s\\S]*?<\\/nav>/gi, '')\n    .replace(/<header[\\s\\S]*?<\\/header>/gi, '')\n    .replace(/<footer[\\s\\S]*?<\\/footer>/gi, '')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;/g, ' ')\n    .replace(/&amp;/g, '&')\n    .replace(/&lt;/g, '<')\n    .replace(/&gt;/g, '>')\n    .replace(/&#\\d+;/g, ' ')\n    .replace(/\\s{2,}/g, ' ')\n    .trim();\n};\n\n// --- Block-Erkennung mit REGEX (toleranter) ---\nconst isBlocked = (text) => {\n  if (!text || text.length < 100) return true;\n  const lower = text.toLowerCase();\n\n  // Regex-Muster fangen auch Variationen mit \"bitte\", \"nun\" etc.\n  const regexPatterns = [\n    /aktivier\\w*\\s+(sie\\s+)?(bitte\\s+)?(nun\\s+)?javascript/,   // \"Aktivieren Sie bitte JavaScript\"\n    /javascript\\s+(ist\\s+)?(nicht\\s+)?(aktiviert|deaktiviert|disabled|required|erforderlich)/,\n    /(please\\s+)?enable\\s+(js|javascript)/,\n    /javascript\\s+is\\s+disabled/,\n    /you\\s+need\\s+to\\s+enable\\s+javascript/,\n    /kein\\s+javascript\\s+aktiviert/,                            // \"kein JavaScript aktiviert\"\n    /javascript\\s+muss\\s+aktiviert/,\n    /verify\\s+(that\\s+)?you\\W+re?\\s+not\\s+a\\s+robot/,\n    /verify\\s+that\\s+you\\s+are\\s+not\\s+a\\s+robot/,\n    /are\\s+you\\s+a\\s+human/,\n    /checking\\s+your\\s+browser/,\n    /cf-browser-verification/,\n    /access\\s+denied/,\n    /zugriff\\s+verweigert/,\n    /captcha/,\n    /bot\\s+detection/,\n    /suspicious\\s+activity/\n  ];\n\n  return regexPatterns.some(rx => rx.test(lower));\n};\n\n// --- Stufe 1: Standard Fetch ---\nconst standardFetch = async (url) => {\n  const html = await this.helpers.httpRequest({\n    method: 'GET',\n    url: url,\n    timeout: 15000,\n    headers: {\n      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',\n      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',\n      'Accept-Language': 'de-DE,de;q=0.9,en;q=0.8',\n      'Accept-Encoding': 'gzip, deflate, br',\n      'Upgrade-Insecure-Requests': '1',\n      'Sec-Fetch-Dest': 'document',\n      'Sec-Fetch-Mode': 'navigate',\n      'Sec-Fetch-Site': 'none'\n    }\n  });\n  return typeof html === 'string' ? html : String(html);\n};\n\n// --- Stufe 2: ScraperAPI Basic ---\nconst scraperApiBasic = async (url) => {\n  const html = await this.helpers.httpRequest({\n    method: 'GET',\n    url: 'https://api.scraperapi.com/',\n    timeout: 70000,\n    qs: {\n      api_key: SCRAPERAPI_KEY,\n      url: url,\n      render: 'true',\n      country_code: 'de'\n    }\n  });\n  return typeof html === 'string' ? html : String(html);\n};\n\n// --- Stufe 3: ScraperAPI Ultra ---\nconst scraperApiUltra = async (url) => {\n  const html = await this.helpers.httpRequest({\n    method: 'GET',\n    url: 'https://api.scraperapi.com/',\n    timeout: 90000,\n    qs: {\n      api_key: SCRAPERAPI_KEY,\n      url: url,\n      render: 'true',\n      ultra_premium: 'true',\n      country_code: 'de'\n    }\n  });\n  return typeof html === 'string' ? html : String(html);\n};\n\n// --- Eskalations-Logik ---\nconst fetchUrl = async (urlObj) => {\n  if (!urlObj.url || !urlObj.url.trim()) return null;\n  const cleanUrl = urlObj.url.trim();\n  const base = { url: cleanUrl, starred: urlObj.starred === true };\n\n  let text = '';\n  let method = 'standard';\n\n  // Stufe 1\n  try {\n    const html = await standardFetch(cleanUrl);\n    text = htmlToText(html);\n  } catch (e) { /* zu Stufe 2 */ }\n\n  if (!isBlocked(text)) {\n    return { ...base, text, ok: true, method, length: text.length };\n  }\n\n  // Stufe 2\n  try {\n    const html = await scraperApiBasic(cleanUrl);\n    text = htmlToText(html);\n    method = 'scraperapi_basic';\n  } catch (e) {\n    return {\n      ...base,\n      text: '[ScraperAPI Basic fehlgeschlagen: ' + e.message + ']',\n      ok: false,\n      method: 'scraperapi_basic_failed'\n    };\n  }\n\n  if (!isBlocked(text)) {\n    return { ...base, text, ok: true, method, length: text.length };\n  }\n\n  // Stufe 3\n  try {\n    const html = await scraperApiUltra(cleanUrl);\n    text = htmlToText(html);\n    method = 'scraperapi_ultra';\n  } catch (e) {\n    return {\n      ...base,\n      text: '[ScraperAPI Ultra fehlgeschlagen: ' + e.message + ']',\n      ok: false,\n      method: 'scraperapi_ultra_failed'\n    };\n  }\n\n  if (isBlocked(text)) {\n    return {\n      ...base,\n      text: '[Seite konnte auch mit Ultra Premium nicht geladen werden - wahrscheinlich CAPTCHA]',\n      ok: false,\n      method: 'blocked'\n    };\n  }\n\n  return { ...base, text, ok: true, method, length: text.length };\n};\n\n// --- Ausfuehrung ---\nconst results = await Promise.all(urls.map(fetchUrl));\nconst fetchedFromUrls = results.filter(r => r !== null);\n\nconst textItems = texts\n  .filter(t => t && t.text && String(t.text).trim())\n  .map(t => ({\n    url: t.label || 'Direkt eingegeben',\n    starred: t.starred === true,\n    text: String(t.text),\n    ok: true,\n    method: 'direct',\n    length: String(t.text).length\n  }));\n\nconst fetched_urls = [...fetchedFromUrls, ...textItems];\n\nreturn [{ json: { urls, texts, fetched_urls } }];"
+      },
+      "id": "8543b512-4f4f-4ad2-8a67-94cc16125d3f",
+      "name": "2. Inhalte abrufen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        176,
+        240
+      ],
+      "notesInFlow": true,
+      "notes": "Ruft URLs ab, gibt Text-Items direkt weiter. Max 5000 Zeichen pro Quelle."
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================================\n// \"4a. Newsletter DOCX erstellen\" (Variante A: Editorial)\n// =====================================================================\n// Erstellt einen Newsletter als .docx-Datei aus dem LLM-Output.\n// Nutzt KEINE externen npm-Pakete - nur Node-Builtins (zlib, Buffer).\n// Eine docx-Datei ist ein ZIP mit XML-Dateien. Beides kann Node selbst.\n// =====================================================================\n\n// ---------------------------------------------------------------------\n// 1) JSON-PARSER (identisch zum bisherigen robusten Parser)\n// ---------------------------------------------------------------------\n\nfunction stripFences(raw) {\n  if (typeof raw !== 'string') return '';\n  return raw\n    .replace(/^\\s*```(?:json)?\\s*/i, '')\n    .replace(/```\\s*$/i, '')\n    .trim();\n}\n\nfunction isolateJsonObject(s) {\n  const start = s.indexOf('{');\n  const end = s.lastIndexOf('}');\n  if (start === -1 || end === -1 || end <= start) return s;\n  return s.slice(start, end + 1);\n}\n\nfunction repairStringContents(s) {\n  let out = '';\n  let inString = false;\n  let escape = false;\n  for (let i = 0; i < s.length; i++) {\n    const ch = s[i];\n    if (escape) { out += ch; escape = false; continue; }\n    if (ch === '\\\\') { out += ch; escape = true; continue; }\n    if (ch === '\"') {\n      if (!inString) { inString = true; out += ch; }\n      else {\n        let j = i + 1;\n        while (j < s.length && /\\s/.test(s[j])) j++;\n        const next = s[j];\n        if (next === undefined || next === ',' || next === '}' || next === ']' || next === ':') {\n          inString = false; out += ch;\n        } else {\n          out += '\\\\\"';\n        }\n      }\n      continue;\n    }\n    if (inString) {\n      if (ch === '\\n') { out += '\\\\n'; continue; }\n      if (ch === '\\r') { out += '\\\\r'; continue; }\n      if (ch === '\\t') { out += '\\\\t'; continue; }\n    }\n    out += ch;\n  }\n  return out;\n}\n\nfunction parseNewsletterJson(raw) {\n  if (typeof raw !== 'string') {\n    return { themenuebersicht: 'Kein LLM-Output erhalten.', articles: [] };\n  }\n  const s = isolateJsonObject(stripFences(raw));\n  try { return JSON.parse(s); } catch (e) {}\n  try {\n    const s2 = s.replace(/,\\s*}/g, '}').replace(/,\\s*]/g, ']');\n    return JSON.parse(s2);\n  } catch (e) {}\n  try {\n    const repaired = repairStringContents(s)\n      .replace(/,\\s*}/g, '}').replace(/,\\s*]/g, ']');\n    return JSON.parse(repaired);\n  } catch (e) {}\n  try {\n    const stripped = repairStringContents(s)\n      .replace(/[\\x00-\\x1F\\x7F]/g, ' ')\n      .replace(/,\\s*}/g, '}').replace(/,\\s*]/g, ']');\n    return JSON.parse(stripped);\n  } catch (eFinal) {\n    return {\n      themenuebersicht: 'Newsletter konnte nicht generiert werden: ' + eFinal.message,\n      articles: []\n    };\n  }\n}\n\n// ---------------------------------------------------------------------\n// 2) XML-HELPERS\n// ---------------------------------------------------------------------\n\nfunction xmlEscape(s) {\n  return String(s ?? '')\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;')\n    .replace(/\"/g, '&quot;')\n    .replace(/'/g, '&apos;');\n}\n\n// Wandelt \\n in mehrere Paragraphen um\nfunction textToRuns(text, runProps) {\n  if (!text) return '';\n  const lines = String(text).split(/\\r?\\n/);\n  return lines.map(line =>\n    `<w:r>${runProps}<w:t xml:space=\"preserve\">${xmlEscape(line)}</w:t></w:r>`\n  ).join('<w:br/>');\n}\n\n// Baut ein <w:p>-Paragraph mit Inhalt\nfunction para(opts) {\n  const {\n    text = '',\n    font = 'Georgia',\n    size = 22,     // in halb-Punkt (22 = 11pt)\n    color = '222222',\n    bold = false,\n    italics = false,\n    allCaps = false,\n    charSpacing = 0,     // in zwanzigstel-Punkt\n    alignment = null,    // 'left' | 'center' | 'right' | 'both' (justify)\n    spacingBefore = 0,\n    spacingAfter = 0,\n    spacingLine = 0,     // 0 = default (276 = 1.15 Zeilenabstand; 340 ~ 1.4)\n    borderLeft = null,   // { color: 'RRGGBB', size: 18 (8tel-Pt), space: 16 (Pt) }\n    borderTop = null,\n    borderBottom = null,\n    indentLeft = 0,      // in DXA\n    indentRight = 0\n  } = opts;\n\n  // Element-Reihenfolge in pPr ist schema-gebunden:\n  // pBdr, spacing, ind, jc, rPr\n  const pPrParts = [];\n  const borders = [];\n  if (borderTop) borders.push(`<w:top w:val=\"single\" w:sz=\"${borderTop.size}\" w:space=\"${borderTop.space||1}\" w:color=\"${borderTop.color}\"/>`);\n  if (borderBottom) borders.push(`<w:bottom w:val=\"single\" w:sz=\"${borderBottom.size}\" w:space=\"${borderBottom.space||1}\" w:color=\"${borderBottom.color}\"/>`);\n  if (borderLeft) borders.push(`<w:left w:val=\"single\" w:sz=\"${borderLeft.size}\" w:space=\"${borderLeft.space||4}\" w:color=\"${borderLeft.color}\"/>`);\n  if (borders.length) pPrParts.push(`<w:pBdr>${borders.join('')}</w:pBdr>`);\n  if (spacingBefore || spacingAfter || spacingLine) {\n    const atts = [];\n    if (spacingBefore) atts.push(`w:before=\"${spacingBefore}\"`);\n    if (spacingAfter) atts.push(`w:after=\"${spacingAfter}\"`);\n    if (spacingLine) atts.push(`w:line=\"${spacingLine}\" w:lineRule=\"auto\"`);\n    pPrParts.push(`<w:spacing ${atts.join(' ')}/>`);\n  }\n  if (indentLeft || indentRight) {\n    const atts = [];\n    if (indentLeft) atts.push(`w:left=\"${indentLeft}\"`);\n    if (indentRight) atts.push(`w:right=\"${indentRight}\"`);\n    pPrParts.push(`<w:ind ${atts.join(' ')}/>`);\n  }\n  if (alignment) pPrParts.push(`<w:jc w:val=\"${alignment}\"/>`);\n\n  const rPrParts = [];\n  rPrParts.push(`<w:rFonts w:ascii=\"${font}\" w:hAnsi=\"${font}\" w:cs=\"${font}\"/>`);\n  if (bold) rPrParts.push('<w:b/>');\n  if (italics) rPrParts.push('<w:i/>');\n  if (allCaps) rPrParts.push('<w:caps/>');\n  if (color) rPrParts.push(`<w:color w:val=\"${color}\"/>`);\n  rPrParts.push(`<w:sz w:val=\"${size}\"/>`);\n  rPrParts.push(`<w:szCs w:val=\"${size}\"/>`);\n  if (charSpacing) rPrParts.push(`<w:spacing w:val=\"${charSpacing}\"/>`);\n  const runProps = `<w:rPr>${rPrParts.join('')}</w:rPr>`;\n\n  // Auch pPr darf rPr haben fuer Absatzmarken-Formatierung (fuer Borders/Abstaende wichtig)\n  const pPr = pPrParts.length\n    ? `<w:pPr>${pPrParts.join('')}<w:rPr>${rPrParts.join('')}</w:rPr></w:pPr>`\n    : '';\n\n  const runs = text\n    ? textToRuns(text, runProps)\n    : `<w:r>${runProps}<w:t xml:space=\"preserve\"></w:t></w:r>`;\n\n  return `<w:p>${pPr}${runs}</w:p>`;\n}\n\n// ---------------------------------------------------------------------\n// 3) NEWSLETTER-LAYOUT (Variante A: Editorial)\n// ---------------------------------------------------------------------\n\nconst DARKBLUE = \"1A2744\";\nconst BLUE = \"1E3A8A\";\nconst GRAY_META = \"5A6A8A\";\nconst GRAY_MUTED = \"7A8A9A\";\nconst TEXT_BLACK = \"222222\";\n\nfunction buildDocumentXml(data) {\n  const today = new Date();\n  const months = ['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];\n  const dateStr = today.getDate() + '. ' + months[today.getMonth()] + ' ' + today.getFullYear();\n  const ausgabeNr = today.toISOString().slice(0,10).replace(/-/g,'');\n\n  const parts = [];\n\n  // --- Haupttitel ---\n  parts.push(para({\n    text: 'Juristische Entwicklungen im Überblick',\n    font: 'Georgia', size: 44, bold: true, color: DARKBLUE,\n    spacingBefore: 400, spacingAfter: 120\n  }));\n  parts.push(para({\n    text: 'Spezialausgabe · Quellenanalyse · ' + dateStr,\n    font: 'Georgia', size: 22, italics: true, color: GRAY_META,\n    spacingAfter: 480\n  }));\n\n  // --- Lead / Themenuebersicht mit linker blauer Linie ---\n  parts.push(para({\n    text: data.themenuebersicht || '',\n    font: 'Georgia', size: 26, italics: true, color: DARKBLUE,\n    spacingAfter: 480, spacingLine: 360,\n    borderLeft: { color: BLUE, size: 18, space: 16 }\n  }));\n\n  // --- Artikel ---\n  const articles = Array.isArray(data.articles) ? data.articles : [];\n  articles.forEach((article, idx) => {\n    // Trenner zwischen Artikeln\n    if (idx > 0) {\n      parts.push(para({\n        text: '◆ ◆ ◆',\n        alignment: 'center', font: 'Georgia', size: 16, color: BLUE,\n        spacingBefore: 360, spacingAfter: 360\n      }));\n    }\n\n    // Kicker \"BEITRAG 1\"\n    parts.push(para({\n      text: 'BEITRAG ' + (article.nummer || (idx + 1)),\n      font: 'Arial', size: 16, bold: true, color: BLUE,\n      charSpacing: 60, spacingAfter: 120\n    }));\n\n    // Titel\n    parts.push(para({\n      text: article.titel || '',\n      font: 'Georgia', size: 36, bold: true, color: DARKBLUE,\n      spacingAfter: 120\n    }));\n\n    // Meta (Quelle/Datum)\n    parts.push(para({\n      text: article.quelle_datum || '',\n      font: 'Georgia', size: 20, italics: true, color: GRAY_META,\n      spacingAfter: 280\n    }));\n\n    // Sections\n    const section = (label, text) => {\n      parts.push(para({\n        text: label,\n        font: 'Arial', size: 18, bold: true, color: BLUE,\n        charSpacing: 40, allCaps: true,\n        spacingBefore: 240, spacingAfter: 80\n      }));\n      parts.push(para({\n        text: text || '',\n        font: 'Georgia', size: 22, color: TEXT_BLACK,\n        alignment: 'both',\n        spacingAfter: 120, spacingLine: 340\n      }));\n    };\n    section('Sachverhalt und Hintergrund', article.sachverhalt);\n    section('Entscheidung und Regelung', article.entscheidung_regelung);\n    section('Praktische Bedeutung', article.praktische_bedeutung);\n    section('Relevante Details', article.relevante_details);\n  });\n\n  if (!articles.length) {\n    parts.push(para({\n      text: 'Keine Artikel im Input gefunden.',\n      font: 'Georgia', size: 22, color: TEXT_BLACK\n    }));\n  }\n\n  // --- Disclaimer ---\n  parts.push(para({\n    text: '',\n    spacingBefore: 600,\n    borderTop: { color: 'CCCCCC', size: 6, space: 12 }\n  }));\n  parts.push(para({\n    text: 'Dieser Newsletter wurde automatisch erstellt. Alle Inhalte dienen ausschliesslich der allgemeinen Information und stellen keine Rechtsberatung dar.',\n    font: 'Georgia', size: 16, italics: true, color: GRAY_MUTED,\n    spacingBefore: 120\n  }));\n\n  // --- Section mit Header/Footer ---\n  const header = buildHeaderXml(dateStr);\n  const footer = buildFooterXml(ausgabeNr);\n\n  const sectPr = `\n    <w:sectPr>\n      <w:headerReference w:type=\"default\" r:id=\"rId10\"/>\n      <w:footerReference w:type=\"default\" r:id=\"rId11\"/>\n      <w:pgSz w:w=\"11906\" w:h=\"16838\"/>\n      <w:pgMar w:top=\"1600\" w:right=\"1800\" w:bottom=\"1600\" w:left=\"1800\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/>\n      <w:cols w:space=\"708\"/>\n      <w:docGrid w:linePitch=\"360\"/>\n    </w:sectPr>`;\n\n  const body = `\n<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"\n            xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">\n  <w:body>\n    ${parts.join('\\n')}\n    ${sectPr}\n  </w:body>\n</w:document>`;\n\n  return { body, header, footer };\n}\n\nfunction buildHeaderXml(dateStr) {\n  // Kopfzeile mit Marke links, Datum rechts, Linie drunter\n  const headerPara = `\n    <w:p>\n      <w:pPr>\n        <w:tabs>\n          <w:tab w:val=\"right\" w:pos=\"8306\"/>\n        </w:tabs>\n        <w:spacing w:after=\"80\"/>\n      </w:pPr>\n      <w:r>\n        <w:rPr>\n          <w:rFonts w:ascii=\"Georgia\" w:hAnsi=\"Georgia\"/>\n          <w:b/>\n          <w:color w:val=\"${DARKBLUE}\"/>\n          <w:spacing w:val=\"40\"/>\n          <w:sz w:val=\"20\"/>\n        </w:rPr>\n        <w:t>RECHTSNEWS</w:t>\n      </w:r>\n      <w:r>\n        <w:rPr><w:rFonts w:ascii=\"Georgia\" w:hAnsi=\"Georgia\"/></w:rPr>\n        <w:tab/>\n      </w:r>\n      <w:r>\n        <w:rPr>\n          <w:rFonts w:ascii=\"Georgia\" w:hAnsi=\"Georgia\"/>\n          <w:color w:val=\"${GRAY_META}\"/>\n          <w:sz w:val=\"18\"/>\n        </w:rPr>\n        <w:t xml:space=\"preserve\">${xmlEscape(dateStr)}</w:t>\n      </w:r>\n    </w:p>\n    <w:p>\n      <w:pPr>\n        <w:pBdr>\n          <w:bottom w:val=\"single\" w:sz=\"6\" w:space=\"1\" w:color=\"${DARKBLUE}\"/>\n        </w:pBdr>\n      </w:pPr>\n    </w:p>`;\n\n  return `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<w:hdr xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\n  ${headerPara}\n</w:hdr>`;\n}\n\nfunction buildFooterXml(ausgabeNr) {\n  // Fusszeile mit Seitenzahl zentriert\n  const footerPara = `\n    <w:p>\n      <w:pPr>\n        <w:jc w:val=\"center\"/>\n      </w:pPr>\n      <w:r>\n        <w:rPr>\n          <w:rFonts w:ascii=\"Georgia\" w:hAnsi=\"Georgia\"/>\n          <w:color w:val=\"${GRAY_MUTED}\"/>\n          <w:sz w:val=\"16\"/>\n        </w:rPr>\n        <w:t xml:space=\"preserve\">Juristischer Newsletter · Ausgabe ${xmlEscape(ausgabeNr)} · Seite </w:t>\n      </w:r>\n      <w:r>\n        <w:rPr>\n          <w:rFonts w:ascii=\"Georgia\" w:hAnsi=\"Georgia\"/>\n          <w:color w:val=\"${GRAY_MUTED}\"/>\n          <w:sz w:val=\"16\"/>\n        </w:rPr>\n        <w:fldChar w:fldCharType=\"begin\"/>\n      </w:r>\n      <w:r>\n        <w:rPr>\n          <w:rFonts w:ascii=\"Georgia\" w:hAnsi=\"Georgia\"/>\n          <w:color w:val=\"${GRAY_MUTED}\"/>\n          <w:sz w:val=\"16\"/>\n        </w:rPr>\n        <w:instrText xml:space=\"preserve\">PAGE</w:instrText>\n      </w:r>\n      <w:r><w:fldChar w:fldCharType=\"end\"/></w:r>\n    </w:p>`;\n\n  return `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<w:ftr xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\n  ${footerPara}\n</w:ftr>`;\n}\n\n// ---------------------------------------------------------------------\n// 4) ZIP-WRITER (ohne externe Pakete, nur zlib)\n// ---------------------------------------------------------------------\n// Eine .docx-Datei ist ein ZIP-Archiv. Wir bauen das ZIP von Hand\n// nach der PKZip-Spezifikation.\n\nfunction crc32(buf) {\n  let table = crc32.table;\n  if (!table) {\n    table = new Uint32Array(256);\n    for (let i = 0; i < 256; i++) {\n      let c = i;\n      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);\n      table[i] = c >>> 0;\n    }\n    crc32.table = table;\n  }\n  let crc = 0xFFFFFFFF;\n  for (let i = 0; i < buf.length; i++) {\n    crc = (crc >>> 8) ^ table[(crc ^ buf[i]) & 0xFF];\n  }\n  return (crc ^ 0xFFFFFFFF) >>> 0;\n}\n\nfunction dosDateTime(d) {\n  const dosTime =\n    ((d.getHours() & 0x1F) << 11) |\n    ((d.getMinutes() & 0x3F) << 5) |\n    ((Math.floor(d.getSeconds() / 2)) & 0x1F);\n  const dosDate =\n    (((d.getFullYear() - 1980) & 0x7F) << 9) |\n    (((d.getMonth() + 1) & 0x0F) << 5) |\n    (d.getDate() & 0x1F);\n  return { dosTime, dosDate };\n}\n\nfunction buildZip(files) {\n  // files = [{ name, data: Buffer }]\n  const now = new Date();\n  const { dosTime, dosDate } = dosDateTime(now);\n  const localChunks = [];\n  const centralChunks = [];\n  let offset = 0;\n\n  for (const f of files) {\n    const nameBuf = Buffer.from(f.name, 'utf-8');\n    const raw = Buffer.isBuffer(f.data) ? f.data : Buffer.from(f.data, 'utf-8');\n    const stored = raw;\n    const crc = crc32(raw);\n\n    // Local file header\n    const local = Buffer.alloc(30 + nameBuf.length);\n    let p = 0;\n    local.writeUInt32LE(0x04034b50, p); p += 4;         // signature\n    local.writeUInt16LE(20, p); p += 2;                 // version needed\n    local.writeUInt16LE(0x0800, p); p += 2;             // general purpose flag (UTF-8)\n    local.writeUInt16LE(0, p); p += 2;                  // method: store (no compression)\n    local.writeUInt16LE(dosTime, p); p += 2;\n    local.writeUInt16LE(dosDate, p); p += 2;\n    local.writeUInt32LE(crc, p); p += 4;\n    local.writeUInt32LE(stored.length, p); p += 4;\n    local.writeUInt32LE(raw.length, p); p += 4;\n    local.writeUInt16LE(nameBuf.length, p); p += 2;\n    local.writeUInt16LE(0, p); p += 2;                  // extra length\n    nameBuf.copy(local, p);\n\n    localChunks.push(local);\n    localChunks.push(stored);\n\n    // Central directory entry\n    const central = Buffer.alloc(46 + nameBuf.length);\n    p = 0;\n    central.writeUInt32LE(0x02014b50, p); p += 4;       // signature\n    central.writeUInt16LE(20, p); p += 2;               // version made by\n    central.writeUInt16LE(20, p); p += 2;               // version needed\n    central.writeUInt16LE(0x0800, p); p += 2;           // general purpose\n    central.writeUInt16LE(0, p); p += 2;                // method: store (no compression)\n    central.writeUInt16LE(dosTime, p); p += 2;\n    central.writeUInt16LE(dosDate, p); p += 2;\n    central.writeUInt32LE(crc, p); p += 4;\n    central.writeUInt32LE(stored.length, p); p += 4;\n    central.writeUInt32LE(raw.length, p); p += 4;\n    central.writeUInt16LE(nameBuf.length, p); p += 2;\n    central.writeUInt16LE(0, p); p += 2;                // extra length\n    central.writeUInt16LE(0, p); p += 2;                // comment length\n    central.writeUInt16LE(0, p); p += 2;                // disk number\n    central.writeUInt16LE(0, p); p += 2;                // internal attrs\n    central.writeUInt32LE(0, p); p += 4;                // external attrs\n    central.writeUInt32LE(offset, p); p += 4;           // local header offset\n    nameBuf.copy(central, p);\n\n    centralChunks.push(central);\n\n    offset += local.length + stored.length;\n  }\n\n  const centralDir = Buffer.concat(centralChunks);\n  const centralSize = centralDir.length;\n  const centralOffset = offset;\n\n  // End of central directory\n  const eocd = Buffer.alloc(22);\n  let p = 0;\n  eocd.writeUInt32LE(0x06054b50, p); p += 4;\n  eocd.writeUInt16LE(0, p); p += 2;                     // disk\n  eocd.writeUInt16LE(0, p); p += 2;                     // disk of central dir\n  eocd.writeUInt16LE(files.length, p); p += 2;\n  eocd.writeUInt16LE(files.length, p); p += 2;\n  eocd.writeUInt32LE(centralSize, p); p += 4;\n  eocd.writeUInt32LE(centralOffset, p); p += 4;\n  eocd.writeUInt16LE(0, p); p += 2;                     // comment length\n\n  return Buffer.concat([...localChunks, centralDir, eocd]);\n}\n\n// ---------------------------------------------------------------------\n// 5) DOCX ZUSAMMENBAUEN (alle noetigen Begleitdateien)\n// ---------------------------------------------------------------------\n\nfunction buildDocx(data) {\n  const { body, header, footer } = buildDocumentXml(data);\n\n  const contentTypes = `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\n  <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\n  <Default Extension=\"xml\" ContentType=\"application/xml\"/>\n  <Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>\n  <Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>\n  <Override PartName=\"/word/header1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml\"/>\n  <Override PartName=\"/word/footer1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml\"/>\n</Types>`;\n\n  const rels = `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\n  <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/>\n</Relationships>`;\n\n  const documentRels = `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\n  <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>\n  <Relationship Id=\"rId10\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/header\" Target=\"header1.xml\"/>\n  <Relationship Id=\"rId11\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer\" Target=\"footer1.xml\"/>\n</Relationships>`;\n\n  const styles = `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\n  <w:docDefaults>\n    <w:rPrDefault>\n      <w:rPr>\n        <w:rFonts w:ascii=\"Georgia\" w:hAnsi=\"Georgia\" w:cs=\"Georgia\"/>\n        <w:sz w:val=\"22\"/>\n        <w:szCs w:val=\"22\"/>\n      </w:rPr>\n    </w:rPrDefault>\n    <w:pPrDefault>\n      <w:pPr>\n        <w:spacing w:after=\"120\" w:line=\"300\" w:lineRule=\"auto\"/>\n      </w:pPr>\n    </w:pPrDefault>\n  </w:docDefaults>\n  <w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\">\n    <w:name w:val=\"Normal\"/>\n    <w:qFormat/>\n  </w:style>\n</w:styles>`;\n\n  const documentXml = `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n${body}`;\n\n  const files = [\n    { name: '[Content_Types].xml', data: contentTypes },\n    { name: '_rels/.rels', data: rels },\n    { name: 'word/_rels/document.xml.rels', data: documentRels },\n    { name: 'word/document.xml', data: documentXml },\n    { name: 'word/styles.xml', data: styles },\n    { name: 'word/header1.xml', data: header },\n    { name: 'word/footer1.xml', data: footer }\n  ];\n\n  return buildZip(files);\n}\n\n// ---------------------------------------------------------------------\n// 6) n8n-INTEGRATION\n// ---------------------------------------------------------------------\n\nconst input = $input.first()?.json ?? {};\n\nconst llmRaw =\n  input?.choices?.[0]?.message?.content ??\n  input?.output ??\n  input?.text ??\n  '{}';\n\nconst data = parseNewsletterJson(llmRaw);\n\nconst docxBuffer = buildDocx(data);\n\nconst heute = new Date().toISOString().slice(0, 10);\nconst filename = 'newsletter_url_' + heute + '.docx';\n\nconst binaryData = await this.helpers.prepareBinaryData(\n  docxBuffer,\n  filename,\n  'application/vnd.openxmlformats-officedocument.wordprocessingml.document'\n);\n\nreturn [{\n  json: { filename },\n  binary: { data: binaryData }\n}];\n"
+      },
+      "id": "0ecd0587-89b7-431e-b127-4019350262bb",
+      "name": "4a. Newsletter DOCX erstellen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1056,
+        112
+      ],
+      "notesInFlow": true,
+      "notes": "Parst LLM-JSON und baut Newsletter-HTML fuer Gotenberg."
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\n// 1) Richtiges Quellfeld holen\nconst llmRaw =\n  input?.choices?.[0]?.message?.content ??\n  input?.output ??\n  input?.text ??\n  input?.content ??\n  '';\n\n// 2) Zielobjekt\nlet postData = { post_text: '', hashtags: [] };\n\n// 3) Robust JSON parser\nfunction tryParse(str) {\n  if (typeof str !== 'string') return null;\n\n  let s = str.trim();\n\n  // Markdown-Fences entfernen\n  s = s.replace(/^```json\\s*/i, '').replace(/^```\\s*/g, '').replace(/```$/g, '').trim();\n\n  // Falls der Text noch \"drumherum\" enthält: erstes JSON-Objekt isolieren\n  const start = s.indexOf('{');\n  const end = s.lastIndexOf('}');\n  if (start === -1 || end === -1 || end <= start) return null;\n  s = s.slice(start, end + 1);\n\n  // 1. Versuch: direkt parsen\n  try {\n    return JSON.parse(s);\n  } catch (e) {}\n\n  // 2. Versuch: Zeilenumbrüche in Strings escapen\n  try {\n    const fixed = s\n      .replace(/\\r/g, '\\\\r')\n      .replace(/\\n/g, '\\\\n');\n    return JSON.parse(fixed);\n  } catch (e) {}\n\n  // 3. Versuch: Kontrollzeichen entfernen und trailing commas bereinigen\n  try {\n    const stripped = s\n      .replace(/[\\x00-\\x1F\\x7F]/g, ' ')\n      .replace(/,\\s*}/g, '}')\n      .replace(/,\\s*]/g, ']');\n    return JSON.parse(stripped);\n  } catch (e) {}\n\n  return null;\n}\n\nconst parsed = tryParse(llmRaw);\n\nif (parsed && typeof parsed === 'object' && parsed.post_text) {\n  postData = parsed;\n} else {\n  // Fallback: Regex-Extraktion\n  const textMatch = String(llmRaw).match(/\"post_text\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\[\\s\\S])*)\"/);\n  const hashMatch = String(llmRaw).match(/\"hashtags\"\\s*:\\s*\\[([^\\]]*)\\]/);\n\n  if (textMatch) {\n    postData.post_text = textMatch[1]\n      .replace(/\\\\n/g, '\\n')\n      .replace(/\\\\\"/g, '\"')\n      .replace(/\\\\\\\\/g, '\\\\');\n  } else {\n    postData.post_text = 'LinkedIn-Post konnte nicht generiert werden.';\n  }\n\n  if (hashMatch) {\n    postData.hashtags = (hashMatch[1].match(/\"([^\"]+)\"/g) || []).map(h => h.replace(/\"/g, ''));\n  }\n}\n\n// 4) Text bereinigen\nconst cleanText = (postData.post_text || '')\n  .replace(/^\\* /gm, '- ')\n  .replace(/\\[Link[^\\]]*\\]/gi, '')\n  .replace(/\\[[^\\]]{1,60}\\]/g, '')\n  .trim();\n\nconst hashtags = Array.isArray(postData.hashtags)\n  ? postData.hashtags.map(h => h.startsWith('#') ? h : `#${h}`)\n  : [];\n\nconst fullText = cleanText + (hashtags.length ? '\\n\\n' + hashtags.join('  ') : '');\n\n// 5) Output\nreturn [{\n  json: {\n    linkedin_post_text: cleanText,\n    linkedin_hashtags: postData.hashtags || [],\n    linkedin_char_count: fullText.length\n  }\n}];\n"
+      },
+      "id": "be16d3bd-da73-42b6-937f-1a5554156f12",
+      "name": "4b. LinkedIn Text aufbereiten",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1184,
+        384
+      ],
+      "notesInFlow": true,
+      "notes": "Robuster 5-stufiger JSON-Parser. Faengt alle LLM-Formatierungsfehler ab."
+    },
+    {
+      "parameters": {
+        "jsCode": "const buf = await this.helpers.getBinaryDataBuffer(0, 'data');\nconst heute = new Date().toISOString().slice(0, 10);\n\nreturn [{\n  json: {\n    newsletter_base64: buf.toString('base64'),\n    newsletter_filename: `newsletter_url_${heute}.docx`,\n    newsletter_mimetype: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'\n  }\n}];\n"
+      },
+      "id": "9f939648-d339-4ae5-965b-b3acb0337f58",
+      "name": "7a. Base64: Newsletter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1808,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "id": "a3c02730-e91d-48a6-a7fd-17898098d7ff",
+      "name": "8. Ergebnisse zusammenfuehren",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        2048,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nlet result = { status: 'success' };\nfor (const item of items) {\n  Object.assign(result, item.json);\n}\nreturn [{ json: result }];\n"
+      },
+      "id": "256dfb41-fc8f-4a39-9488-b66520390de3",
+      "name": "9. Response bauen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2288,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "07c82701-1365-4029-a77e-53309f4ab590",
+      "name": "10. Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        2528,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{\n(() => {\n  const mergeItems = $items(\"Merge\");\n\n  const mergedTexts = mergeItems\n    .map((item, i) => {\n      const text =\n        item.json.markdown ??\n        item.json.text ??\n        item.json.texts ??\n        item.json.pages?.map(p => p.markdown).join(\"\\n\\n\") ??\n        \"\";\n\n      return text\n        ? `===== TEXT ${i + 1} =====\\n${text}`\n        : \"\";\n    })\n    .filter(Boolean);\n\n  const urlBlocks = ($json.fetched_urls ?? [])\n    .map((s, i) => {\n      const text =\n        s.text ??\n        s.markdown ??\n        s.pages?.map(p => p.markdown).join(\"\\n\\n\") ??\n        \"\";\n\n      return text\n        ? `===== QUELLE ${i + 1} =====\nURL: ${s.url}\nstarred: ${s.starred}\nok: ${s.ok}\nmethod: ${s.method}\n\n${text}`\n        : \"\";\n    })\n    .filter(Boolean);\n\n  return [\n    \"Hier die Quellen, welche zu einem Newsletter verarbeitet werden sollen. Achte auf dein System Prompt:\",\n    ...mergedTexts,\n    ...urlBlocks,\n  ].join(\"\\n\\n\");\n})()\n}}",
+        "options": {
+          "systemMessage": "=# System Prompt für den AI Agent \"LinkedIn-Post generieren\"\n\nDu bist ein erfahrener Legal-Content-Redakteur, der aus juristischen Quellen\nprägnante LinkedIn-Posts für eine Kanzlei oder einen Rechtsanwalt erstellt.\n\n## Deine Aufgabe\n\nAus den bereitgestellten Quellen (Urteile, Gesetzesänderungen, Fachartikel)\nerstellst du EINEN einzigen LinkedIn-Post, der:\n\n- eine juristisch relevante Neuigkeit professionell vermittelt\n- für ein Fachpublikum (andere Juristen, interessierte Mandanten) geschrieben ist\n- Mehrwert statt Selbstdarstellung bietet\n- zum Weiterlesen oder Nachdenken anregt\n\n## Ausgabeformat (STRIKT EINHALTEN)\n\nDu antwortest AUSSCHLIESSLICH mit einem gültigen JSON-Objekt in dieser Struktur:\n\n{\n  \"post_text\": \"Der vollständige LinkedIn-Post als String. Zeilenumbrüche mit \\\\n.\",\n  \"hashtags\": [\"Recht\", \"Urteil\", \"Verbraucherschutz\"]\n}\n\nWICHTIG:\n- KEINE Markdown-Codefences (kein ```json, kein ```)\n- KEINE Einleitung wie \"Hier ist der Post:\"\n- KEINE Erklärung nach dem JSON\n- Nur das reine JSON-Objekt, nichts davor, nichts danach\n- Alle Zeilenumbrüche im post_text als \\\\n, KEINE echten Newlines im JSON-String\n- Anführungszeichen im Text als \\\\\" escapen\n\n## Regeln für post_text\n\n**Länge:** 800-1300 Zeichen (ohne Hashtags). LinkedIn schneidet nach ~210 Zeichen\nim \"Mehr anzeigen\"-Preview ab — die ersten 2-3 Zeilen müssen Neugier wecken.\n\n**Aufbau (als Empfehlung, nicht starr):**\n1. Hook-Zeile: Eine starke, konkrete Aussage oder Frage zum Thema (max. 1 Satz)\n2. Leerzeile\n3. Kontext/Sachverhalt in 2-3 Sätzen (was ist passiert?)\n4. Leerzeile\n5. Kern der Entscheidung/Regelung in 2-3 Sätzen (was wurde entschieden?)\n6. Leerzeile\n7. Praktische Bedeutung / Take-away für die Leser (2-3 Sätze)\n8. Leerzeile\n9. Optional: Offene Frage zur Diskussion\n\n**Stil:**\n- Professionell, aber nicht steif\n- Klare, kurze Sätze\n- KEINE Floskeln wie \"spannendes Urteil\", \"wichtiger Meilenstein\"\n- KEINE Emojis am Zeilenanfang als Bullet-Ersatz (das wirkt billig)\n- Maximal 1-2 dezente Emojis im gesamten Post, wenn überhaupt\n- Du-Form vermeiden, Sie-Form oder neutral schreiben\n- Aktenzeichen und Datum des Urteils konkret nennen\n- Paragrafen nennen, wo relevant (z.B. \"§ 357 BGB\")\n\n**Verboten:**\n- \"In einem bemerkenswerten Urteil...\"\n- \"Dieses wegweisende Urteil zeigt...\"\n- \"Als Anwalt/Jurist ist es wichtig...\"\n- Ich-Form (\"Ich finde das Urteil spannend\")\n- Werbende Aussagen über die Kanzlei\n- Reine Zusammenfassungen ohne Einordnung\n\n## Regeln für hashtags\n\n- 4 bis 6 Hashtags\n- Ohne führendes #-Zeichen im Array (nur der Begriff)\n- Gemischt: 2-3 breite (#Recht, #Jura) + 2-3 spezifische (#Verbraucherrecht, #BGB)\n- Deutsche Hashtags bevorzugen, wenn die Quelle deutsch ist\n- CamelCase bei mehreren Wörtern: \"Verbraucherschutz\" nicht \"verbraucher schutz\"\n\n## Wenn mehrere Quellen vorliegen\n\n- Wähle die EINE interessanteste / aktuellste / praxisrelevanteste Quelle aus\n- Mit Stern (starred: true) markierte Quellen haben Priorität\n- Erstelle KEINEN Sammelpost über mehrere Themen — ein fokussierter Post wirkt besser\n\n## Wenn die Quellen unbrauchbar sind\n\nFalls alle Quellen fehlerhaft abgerufen wurden, keinen juristischen Inhalt haben\noder nur Navigationstext enthalten, antworte trotzdem mit gültigem JSON:\n\n{\n  \"post_text\": \"Keine verwertbare juristische Quelle im Input gefunden.\",\n  \"hashtags\": []\n}\n\n## Input\n\nDie Quellen stehen unten als Array \"fetched_urls\" mit Feldern url, text, starred."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        800,
+        544
+      ],
+      "id": "ef8b6d4b-704f-4104-9bca-2ad1b1ee0cb9",
+      "name": "AI Agent",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "claude-sonnet-4-5-20250929",
+          "cachedResultName": "Claude Sonnet 4.5"
+        },
+        "options": {
+          "maxTokensToSample": 8000,
+          "temperature": 0.3
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        656,
+        704
+      ],
+      "id": "16611766-f5db-4ac4-a19f-f7bef08f127e",
+      "name": "Anthropic Chat Model",
+      "credentials": {
+        "anthropicApi": {
+          "id": "dJO0wfHtA0d8q0xA",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{\n(() => {\n  const mergeItems = $items(\"Merge\");\n\n  const mergedTexts = mergeItems\n    .map((item, i) => {\n      const text =\n        item.json.markdown ??\n        item.json.text ??\n        item.json.texts ??\n        item.json.pages?.map(p => p.markdown).join(\"\\n\\n\") ??\n        \"\";\n\n      return text\n        ? `===== TEXT ${i + 1} =====\\n${text}`\n        : \"\";\n    })\n    .filter(Boolean);\n\n  const urlBlocks = ($json.fetched_urls ?? [])\n    .map((s, i) => {\n      const text =\n        s.text ??\n        s.markdown ??\n        s.pages?.map(p => p.markdown).join(\"\\n\\n\") ??\n        \"\";\n\n      return text\n        ? `===== QUELLE ${i + 1} =====\nURL: ${s.url}\nstarred: ${s.starred}\nok: ${s.ok}\nmethod: ${s.method}\n\n${text}`\n        : \"\";\n    })\n    .filter(Boolean);\n\n  return [\n    \"Hier die Quellen, welche zu einem Newsletter verarbeitet werden sollen. Achte auf dein System Prompt:\",\n    ...mergedTexts,\n    ...urlBlocks,\n  ].join(\"\\n\\n\");\n})()\n}}",
+        "options": {
+          "systemMessage": "System Prompt für den AI Agent \"Newsletter generieren\"\nDu bist ein erfahrener juristischer Redakteur für einen Fach-Newsletter.\nDeine Aufgabe ist es, aus mehreren Quellen (Urteile, Gesetzesänderungen,\nFachartikel) einen professionellen Newsletter für Anwälte, Kanzleien und\njuristisch interessierte Leser zu erstellen.\nDeine Aufgabe\nAus den bereitgestellten Quellen erstellst du einen strukturierten Newsletter,\nder:\n\nmehrere juristische Themen als separate Artikel aufbereitet\nfür ein Fachpublikum verständlich und präzise formuliert ist\nden Stand der Rechtslage korrekt wiedergibt (keine Spekulation)\npraktisch verwertbare Informationen liefert\ndie wichtigsten Details kompakt zusammenfasst\n\nUmgang mit den Quellen\nDie Quellen kommen als kompletter, unbearbeiteter Seitentext — oft mehrere\ntausend Zeichen pro Quelle, inklusive Seiten-Boilerplate (Navigation,\nCookie-Hinweise, Footer, Impressum).\nBeim Lesen:\n\nTrenne juristischen Kerninhalt von Website-Beiwerk\nIgnoriere Navigation, Cookie-Banner, \"Skip to content\", Impressum, Footer\nFokussiere auf: Aktenzeichen, Datum, Gericht, Sachverhalt, Entscheidung,\nLeitsätze, einschlägige Normen\nBei sehr langen Urteilen: Tenor, Leitsätze und tragende Gründe haben Priorität\nQuellen mit ok: false oder Text in eckigen Klammern (z.B. \"[Fallback\nfehlgeschlagen]\") sind Fehler und werden komplett ignoriert\nQuellen, die nur aus JS-Wall, Cookie-Banner oder Navigation bestehen, werden\nübersprungen\n\nPro brauchbarer Quelle = ein Artikel. Mehrere Artikel zum gleichen Thema\nnicht zusammenfassen, sondern beibehalten. Starred-Quellen (starred: true)\nsollten prominent behandelt werden — aber auch nicht-markierte Quellen kommen\nin den Newsletter.\nAusgabeformat (STRIKT EINHALTEN)\nDu antwortest AUSSCHLIESSLICH mit einem gültigen JSON-Objekt in dieser Struktur:\n{\n\"themenuebersicht\": \"Kurzer Teaser-Text, der die Themen der Ausgabe zusammenfasst (2-3 Sätze, max. 400 Zeichen).\",\n\"articles\": [\n{\n\"nummer\": \"1\",\n\"titel\": \"Prägnanter Titel des Artikels\",\n\"quelle_datum\": \"Gericht/Quelle, Datum, Aktenzeichen\",\n\"sachverhalt\": \"Worum ging es? Was war der Ausgangspunkt?\",\n\"entscheidung_regelung\": \"Was wurde entschieden oder geregelt? Konkret und korrekt.\",\n\"praktische_bedeutung\": \"Was bedeutet das für die Praxis? Was sollten Leser daraus mitnehmen?\",\n\"relevante_details\": \"Weitere wichtige Aspekte, Begründung, Hintergrund, offene Fragen.\"\n}\n]\n}\nWICHTIG:\n\nKEINE Markdown-Codefences (kein json, kein )\nKEINE Einleitung wie \"Hier ist der Newsletter:\"\nKEINE Erklärung nach dem JSON\nNur das reine JSON-Objekt, nichts davor, nichts danach\nAlle Zeilenumbrüche in Strings als \\n escapen\nAnführungszeichen in Strings als \\\" escapen\nKeine echten Newlines innerhalb der JSON-String-Werte\n\nRegeln für themenuebersicht\n\n2 bis 3 Sätze, max. 400 Zeichen\nNennt die behandelten Rechtsgebiete oder Themen\nWeckt Interesse ohne zu werben\nKEIN \"In dieser Ausgabe erfahren Sie...\" — direkter einsteigen\nBeispiel: \"Der BGH präzisiert die Anforderungen an Widerrufsbelehrungen\nbei Autokrediten. Das OLG München entscheidet zur Mangelhaftung bei\nSoftware-Updates. Neu im Arbeitsrecht: Die Betriebsratsvergütung nach\nder jüngsten Gesetzesänderung.\"\n\nRegeln für articles\nAnzahl: Ein Artikel pro verwertbarer Quelle. Mindestens 1, maximal so viele\nwie brauchbare Quellen vorhanden sind.\nnummer: Fortlaufend als String (\"1\", \"2\", \"3\"), mit starred-Quellen zuerst,\ndanach absteigend nach Relevanz/Aktualität.\ntitel:\n\n40-90 Zeichen\nKonkret, nicht werblich\nNennt idealerweise Gericht und Kerninhalt\nBeispiele:\n\n\"OLG Stuttgart: Wertersatz nach Widerruf eines Autokredits\"\n\"Neufassung § 79a BetrVG — Klarstellung zur Betriebsratsvergütung\"\n\n\nKeine Floskeln wie \"Spannendes Urteil zu...\", \"Wegweisende Entscheidung...\"\n\nquelle_datum:\n\nFormat: \"Gericht/Quelle, Datum, Az.\"\nBeispiel: \"OLG Stuttgart, Urteil vom 14.04.2026, Az. 6 U 225/22\"\nBei Gesetzen: \"Bundesgesetzblatt, [Datum], [Fundstelle]\"\nWenn eine Angabe fehlt: weglassen, nicht erfinden\nWenn gar keine Quelle erkennbar: URL in Kurzform nennen\n\nsachverhalt:\n\n3-5 Sätze\nBeantwortet: Was war passiert? Wer klagte gegen wen? Worum ging es?\nKeine Juristenfachsprache ohne Not — verständlich bleiben\nKeine Bewertung, nur Fakten\n\nentscheidung_regelung:\n\n3-5 Sätze\nBeantwortet: Was wurde entschieden? Welche Norm gilt wie?\nTenor präzise wiedergeben, relevante Paragrafen nennen (z.B. \"§ 357 BGB\")\nBei Urteilen: Wer gewinnt, wer verliert, in welchem Umfang\n\npraktische_bedeutung:\n\n2-4 Sätze\nDer wichtigste Abschnitt — was nimmt der Leser mit?\nKonkrete Handlungsempfehlungen oder Konsequenzen\nFür wen besonders relevant? Verbraucher, Unternehmer, Anwälte einer Fachrichtung?\n\nrelevante_details:\n\n2-5 Sätze\nBegründung des Gerichts in Kurzform\nAbweichungen zur bisherigen Rechtsprechung\nNoch offene Fragen oder erwartete Revisionen\nHistorischer Kontext, wenn relevant\n\nStilregeln für ALLE Textfelder\nSchreibweise:\n\nSachlich und präzise, aber nicht trocken\nAktive Formulierungen bevorzugen\nSie-Form oder neutrale Formulierungen, keine Du-Form\nKeine Ich-Form, keine Wir-Form (\"wir meinen...\")\nKeine werbenden Aussagen über eine Kanzlei\n\nVerboten:\n\n\"In einem bemerkenswerten Urteil...\"\n\"Dieses wegweisende Urteil zeigt...\"\n\"Wie allgemein bekannt...\"\n\"Selbstverständlich gilt...\"\nKonjunktiv-Kaskaden (\"es könnte sein, dass möglicherweise...\")\nSpekulation über nicht im Urteil enthaltene Aspekte\n\nFachsprache:\n\nParagrafen immer mit § (nicht \"Paragraph\")\nGerichte ausschreiben (nicht \"BGH\" nur, sondern beim Ersterwähnen\n\"Bundesgerichtshof (BGH)\")\nAktenzeichen in Originalformat\nDatumsformat: TT.MM.JJJJ\n\nWenn keine verwertbaren Quellen vorliegen\nFalls alle Quellen unbrauchbar sind (nur Cookie-Banner, JS-Wall-Meldungen,\nFehler), antworte mit:\n{\n\"themenuebersicht\": \"Keine verwertbaren Quellen konnten für diese Ausgabe abgerufen werden.\",\n\"articles\": []\n}\nInput\nDie Quellen stehen unten als Array \"fetched_urls\" mit den Feldern:\n\nurl: die Quell-URL oder Label bei direkt eingegebenen Texten\ntext: der extrahierte Seitentext (kann sehr lang sein, mit Boilerplate)\nstarred: true/false — markierte Quellen haben Priorität\nok: true/false — false heißt Abruf fehlgeschlagen, Quelle ignorieren\nmethod: standard / scraperapi_basic / scraperapi_ultra / direct — nur Info\nlength: Zeichenzahl des Texts — nur Info"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        624,
+        0
+      ],
+      "id": "cd9292f9-aecc-4624-be3f-8cd328da0d68",
+      "name": "AI Agent1"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "claude-sonnet-4-5-20250929",
+          "cachedResultName": "Claude Sonnet 4.5"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        656,
+        208
+      ],
+      "id": "b7e16181-d005-40f2-9bb2-200ba18dd936",
+      "name": "Anthropic Chat Model1",
+      "credentials": {
+        "anthropicApi": {
+          "id": "dJO0wfHtA0d8q0xA",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "urls",
+              "name": "urls",
+              "value": "={{ (() => { const b = $json.body || {}; const out = []; for (let i = 0; i < 5; i++) { const u = b['url_' + i]; if (u && String(u).trim()) { out.push({ url: String(u).trim(), starred: b['starred_' + i] === true || b['starred_' + i] === 'true' }); } } return out; })() }}",
+              "type": "array"
+            },
+            {
+              "id": "texts",
+              "name": "texts",
+              "value": "={{ $json.body.texts || [] }}",
+              "type": "array"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0639baae-3c1f-4abc-b8f1-7c3ffffb9268",
+      "name": "1. Parameter festlegen",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -880,
+        240
+      ],
+      "notesInFlow": true,
+      "notes": "Liest URLs-Array und Texts-Array aus dem Webhook-Body."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "3ae7c84a-358f-40a6-a442-9342c972409a",
+              "leftValue": "={{ $json['urls[0]'].includes(\".pdf\") }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -480,
+        240
+      ],
+      "id": "ec22ca6c-f43d-4b6b-9618-721236c67ed8",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "urls[0]",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        -672,
+        240
+      ],
+      "id": "5b191844-f674-4b89-8dfc-be2efee0a379",
+      "name": "Split Out"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json['urls[0]'] }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -320,
+        416
+      ],
+      "id": "75f9d9f9-0402-44e3-a8fc-0d6a539e6374",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        384,
+        256
+      ],
+      "id": "6e7bce1a-4c2f-425f-a607-b801bcc9d4db",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "amount": 60
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        544,
+        464
+      ],
+      "id": "e103139b-8f5a-4083-b28c-84b6fda05ad0",
+      "name": "Wait"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mistralAi",
+      "typeVersion": 1,
+      "position": [
+        80,
+        416
+      ],
+      "id": "d90c8076-bdd9-4bf8-8a59-8426f89f4cac",
+      "name": "Extract text",
+      "credentials": {
+        "mistralCloudApi": {
+          "id": "6IXVK6CTGOxjClUR",
+          "name": "Mistral Cloud account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "1. Parameter festlegen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2. Inhalte abrufen": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4b. LinkedIn Text aufbereiten": {
+      "main": [
+        [
+          {
+            "node": "8. Ergebnisse zusammenfuehren",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "7a. Base64: Newsletter": {
+      "main": [
+        [
+          {
+            "node": "8. Ergebnisse zusammenfuehren",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "8. Ergebnisse zusammenfuehren": {
+      "main": [
+        [
+          {
+            "node": "9. Response bauen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "9. Response bauen": {
+      "main": [
+        [
+          {
+            "node": "10. Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "4b. LinkedIn Text aufbereiten",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent1": {
+      "main": [
+        [
+          {
+            "node": "4a. Newsletter DOCX erstellen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent1",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "1. Parameter festlegen": {
+      "main": [
+        [
+          {
+            "node": "Split Out",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4a. Newsletter DOCX erstellen": {
+      "main": [
+        [
+          {
+            "node": "7a. Base64: Newsletter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "2. Inhalte abrufen",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Extract text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "AI Agent1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract text": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  }
+}

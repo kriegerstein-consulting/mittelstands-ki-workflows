@@ -1,0 +1,478 @@
+{
+  "name": "Fall B - Newsletter- und LinkedIn-Generator (PDF)",
+  "nodes": [
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=={{\n(() => {\n  const all = $input.all();\n\n  const blocks = all\n    .map((item, i) => {\n      const text =\n        item.json.markdown ??\n        item.json.text ??\n        item.json.pages?.map(p => p.markdown).join(\"\\n\\n\") ??\n        \"\";\n\n      const fileName =\n        item.json.fileName ??\n        item.json.name ??\n        `Quelle ${i + 1}`;\n\n      return text\n        ? `===== QUELLE ${i + 1}: ${fileName} =====\\n${text}`\n        : \"\";\n    })\n    .filter(Boolean);\n\n  return [\n    \"Hier die Quellen, welche zu einem Newsletter verarbeitet werden sollen. Achte auf dein System Prompt:\",\n    ...blocks,\n  ].join(\"\\n\\n\");\n})()\n}}",
+        "options": {
+          "systemMessage": "=Du bist juristischer Redakteur. Erstelle einen professionellen LinkedIn-Beitrag fuer eine Wirtschaftskanzlei.STIL: Sachlich-fachlich. Juristische Fachsprache erwuenscht. Kein Marketing-Ton. Praegnanter Titel mit konkretem Sachverhalts-Detail.STRUKTUR: Titel, Gericht+Datum+AZ, Leitsatz (1-2 Saetze), Sachverhalt (3-5 Saetze), Entscheidung (3-5 Saetze), Praxiseinordnung (2-4 Saetze), Call-to-Action.LAENGE: 1800-2500 Zeichen. Maximal 2 Emojis. GANZ WICHTIG: Keine Erfindungen, du darfst nur den Input aus dem PROMPT verarbeiten. Keine Platzhalter.KRITISCH FUER DIE AUSGABE: Antworte NUR mit einem einzigen JSON-Objekt. Kein Text davor oder danach. Kein Markdown. Keine Backticks. Alle Zeilenumbrueche im post_text als \\\\n escapen. Format: {\\\"post_text\\\":\\\"...\\\",\\\"hashtags\\\":[\\\"#Tag1\\\",\\\"#Tag2\\\"]}\""
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -304,
+        -64
+      ],
+      "id": "3305cb12-7003-4f38-8286-1db03019a508",
+      "name": "AI Agent2",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "claude-sonnet-4-5-20250929",
+          "cachedResultName": "Claude Sonnet 4.5"
+        },
+        "options": {
+          "maxTokensToSample": 8000,
+          "temperature": 0.3
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        -240,
+        160
+      ],
+      "id": "41e4d369-1d44-400e-ad3c-b9c65f965042",
+      "name": "Anthropic Chat Model1",
+      "credentials": {
+        "anthropicApi": {
+          "id": "dJO0wfHtA0d8q0xA",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\n// 1) Richtiges Quellfeld holen\nconst llmRaw =\n  input?.choices?.[0]?.message?.content ??\n  input?.output ??\n  input?.text ??\n  input?.content ??\n  '';\n\n// 2) Zielobjekt\nlet postData = { post_text: '', hashtags: [] };\n\n// 3) Robust JSON parser\nfunction tryParse(str) {\n  if (typeof str !== 'string') return null;\n\n  let s = str.trim();\n\n  // Markdown-Fences entfernen\n  s = s.replace(/^```json\\s*/i, '').replace(/^```\\s*/g, '').replace(/```$/g, '').trim();\n\n  // Falls der Text noch \"drumherum\" enthält: erstes JSON-Objekt isolieren\n  const start = s.indexOf('{');\n  const end = s.lastIndexOf('}');\n  if (start === -1 || end === -1 || end <= start) return null;\n  s = s.slice(start, end + 1);\n\n  // 1. Versuch: direkt parsen\n  try {\n    return JSON.parse(s);\n  } catch (e) {}\n\n  // 2. Versuch: Zeilenumbrüche in Strings escapen\n  try {\n    const fixed = s\n      .replace(/\\r/g, '\\\\r')\n      .replace(/\\n/g, '\\\\n');\n    return JSON.parse(fixed);\n  } catch (e) {}\n\n  // 3. Versuch: Kontrollzeichen entfernen und trailing commas bereinigen\n  try {\n    const stripped = s\n      .replace(/[\\x00-\\x1F\\x7F]/g, ' ')\n      .replace(/,\\s*}/g, '}')\n      .replace(/,\\s*]/g, ']');\n    return JSON.parse(stripped);\n  } catch (e) {}\n\n  return null;\n}\n\nconst parsed = tryParse(llmRaw);\n\nif (parsed && typeof parsed === 'object' && parsed.post_text) {\n  postData = parsed;\n} else {\n  // Fallback: Regex-Extraktion\n  const textMatch = String(llmRaw).match(/\"post_text\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\[\\s\\S])*)\"/);\n  const hashMatch = String(llmRaw).match(/\"hashtags\"\\s*:\\s*\\[([^\\]]*)\\]/);\n\n  if (textMatch) {\n    postData.post_text = textMatch[1]\n      .replace(/\\\\n/g, '\\n')\n      .replace(/\\\\\"/g, '\"')\n      .replace(/\\\\\\\\/g, '\\\\');\n  } else {\n    postData.post_text = 'LinkedIn-Post konnte nicht generiert werden.';\n  }\n\n  if (hashMatch) {\n    postData.hashtags = (hashMatch[1].match(/\"([^\"]+)\"/g) || []).map(h => h.replace(/\"/g, ''));\n  }\n}\n\n// 4) Text bereinigen\nconst cleanText = (postData.post_text || '')\n  .replace(/^\\* /gm, '- ')\n  .replace(/\\[Link[^\\]]*\\]/gi, '')\n  .replace(/\\[[^\\]]{1,60}\\]/g, '')\n  .trim();\n\nconst hashtags = Array.isArray(postData.hashtags)\n  ? postData.hashtags.map(h => h.startsWith('#') ? h : `#${h}`)\n  : [];\n\nconst fullText = cleanText + (hashtags.length ? '\\n\\n' + hashtags.join('  ') : '');\n\n// 5) Output\nreturn [{\n  json: {\n    linkedin_post_text: cleanText,\n    linkedin_hashtags: postData.hashtags || [],\n    linkedin_char_count: fullText.length\n  }\n}];"
+      },
+      "id": "71f5ebda-7202-4aee-b4b7-bf5279088503",
+      "name": "4b. LinkedIn Text aufbereiten1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        48,
+        -64
+      ],
+      "notesInFlow": true,
+      "notes": "Robuster 5-stufiger JSON-Parser. Faengt alle LLM-Formatierungsfehler ab."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "639ccf57-3abf-4f9e-8047-e17486bdac2c",
+      "name": "10. Respond to Webhook1",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        944,
+        -288
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================================\n// \"4a. Newsletter DOCX erstellen\" (Variante A: Editorial)\n// =====================================================================\n// Erstellt einen Newsletter als .docx-Datei aus dem LLM-Output.\n// Nutzt KEINE externen npm-Pakete - nur Node-Builtins (zlib, Buffer).\n// Eine docx-Datei ist ein ZIP mit XML-Dateien. Beides kann Node selbst.\n// =====================================================================\n\n// ---------------------------------------------------------------------\n// 1) JSON-PARSER (identisch zum bisherigen robusten Parser)\n// ---------------------------------------------------------------------\n\nfunction stripFences(raw) {\n  if (typeof raw !== 'string') return '';\n  return raw\n    .replace(/^\\s*```(?:json)?\\s*/i, '')\n    .replace(/```\\s*$/i, '')\n    .trim();\n}\n\nfunction isolateJsonObject(s) {\n  const start = s.indexOf('{');\n  const end = s.lastIndexOf('}');\n  if (start === -1 || end === -1 || end <= start) return s;\n  return s.slice(start, end + 1);\n}\n\nfunction repairStringContents(s) {\n  let out = '';\n  let inString = false;\n  let escape = false;\n  for (let i = 0; i < s.length; i++) {\n    const ch = s[i];\n    if (escape) { out += ch; escape = false; continue; }\n    if (ch === '\\\\') { out += ch; escape = true; continue; }\n    if (ch === '\"') {\n      if (!inString) { inString = true; out += ch; }\n      else {\n        let j = i + 1;\n        while (j < s.length && /\\s/.test(s[j])) j++;\n        const next = s[j];\n        if (next === undefined || next === ',' || next === '}' || next === ']' || next === ':') {\n          inString = false; out += ch;\n        } else {\n          out += '\\\\\"';\n        }\n      }\n      continue;\n    }\n    if (inString) {\n      if (ch === '\\n') { out += '\\\\n'; continue; }\n      if (ch === '\\r') { out += '\\\\r'; continue; }\n      if (ch === '\\t') { out += '\\\\t'; continue; }\n    }\n    out += ch;\n  }\n  return out;\n}\n\nfunction parseNewsletterJson(raw) {\n  if (typeof raw !== 'string') {\n    return { themenuebersicht: 'Kein LLM-Output erhalten.', articles: [] };\n  }\n  const s = isolateJsonObject(stripFences(raw));\n  try { return JSON.parse(s); } catch (e) {}\n  try {\n    const s2 = s.replace(/,\\s*}/g, '}').replace(/,\\s*]/g, ']');\n    return JSON.parse(s2);\n  } catch (e) {}\n  try {\n    const repaired = repairStringContents(s)\n      .replace(/,\\s*}/g, '}').replace(/,\\s*]/g, ']');\n    return JSON.parse(repaired);\n  } catch (e) {}\n  try {\n    const stripped = repairStringContents(s)\n      .replace(/[\\x00-\\x1F\\x7F]/g, ' ')\n      .replace(/,\\s*}/g, '}').replace(/,\\s*]/g, ']');\n    return JSON.parse(stripped);\n  } catch (eFinal) {\n    return {\n      themenuebersicht: 'Newsletter konnte nicht generiert werden: ' + eFinal.message,\n      articles: []\n    };\n  }\n}\n\n// ---------------------------------------------------------------------\n// 2) XML-HELPERS\n// ---------------------------------------------------------------------\n\nfunction xmlEscape(s) {\n  return String(s ?? '')\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;')\n    .replace(/\"/g, '&quot;')\n    .replace(/'/g, '&apos;');\n}\n\n// Wandelt \\n in mehrere Paragraphen um\nfunction textToRuns(text, runProps) {\n  if (!text) return '';\n  const lines = String(text).split(/\\r?\\n/);\n  return lines.map(line =>\n    `<w:r>${runProps}<w:t xml:space=\"preserve\">${xmlEscape(line)}</w:t></w:r>`\n  ).join('<w:br/>');\n}\n\n// Baut ein <w:p>-Paragraph mit Inhalt\nfunction para(opts) {\n  const {\n    text = '',\n    font = 'Georgia',\n    size = 22,     // in halb-Punkt (22 = 11pt)\n    color = '222222',\n    bold = false,\n    italics = false,\n    allCaps = false,\n    charSpacing = 0,     // in zwanzigstel-Punkt\n    alignment = null,    // 'left' | 'center' | 'right' | 'both' (justify)\n    spacingBefore = 0,\n    spacingAfter = 0,\n    spacingLine = 0,     // 0 = default (276 = 1.15 Zeilenabstand; 340 ~ 1.4)\n    borderLeft = null,   // { color: 'RRGGBB', size: 18 (8tel-Pt), space: 16 (Pt) }\n    borderTop = null,\n    borderBottom = null,\n    indentLeft = 0,      // in DXA\n    indentRight = 0\n  } = opts;\n\n  // Element-Reihenfolge in pPr ist schema-gebunden:\n  // pBdr, spacing, ind, jc, rPr\n  const pPrParts = [];\n  const borders = [];\n  if (borderTop) borders.push(`<w:top w:val=\"single\" w:sz=\"${borderTop.size}\" w:space=\"${borderTop.space||1}\" w:color=\"${borderTop.color}\"/>`);\n  if (borderBottom) borders.push(`<w:bottom w:val=\"single\" w:sz=\"${borderBottom.size}\" w:space=\"${borderBottom.space||1}\" w:color=\"${borderBottom.color}\"/>`);\n  if (borderLeft) borders.push(`<w:left w:val=\"single\" w:sz=\"${borderLeft.size}\" w:space=\"${borderLeft.space||4}\" w:color=\"${borderLeft.color}\"/>`);\n  if (borders.length) pPrParts.push(`<w:pBdr>${borders.join('')}</w:pBdr>`);\n  if (spacingBefore || spacingAfter || spacingLine) {\n    const atts = [];\n    if (spacingBefore) atts.push(`w:before=\"${spacingBefore}\"`);\n    if (spacingAfter) atts.push(`w:after=\"${spacingAfter}\"`);\n    if (spacingLine) atts.push(`w:line=\"${spacingLine}\" w:lineRule=\"auto\"`);\n    pPrParts.push(`<w:spacing ${atts.join(' ')}/>`);\n  }\n  if (indentLeft || indentRight) {\n    const atts = [];\n    if (indentLeft) atts.push(`w:left=\"${indentLeft}\"`);\n    if (indentRight) atts.push(`w:right=\"${indentRight}\"`);\n    pPrParts.push(`<w:ind ${atts.join(' ')}/>`);\n  }\n  if (alignment) pPrParts.push(`<w:jc w:val=\"${alignment}\"/>`);\n\n  const rPrParts = [];\n  rPrParts.push(`<w:rFonts w:ascii=\"${font}\" w:hAnsi=\"${font}\" w:cs=\"${font}\"/>`);\n  if (bold) rPrParts.push('<w:b/>');\n  if (italics) rPrParts.push('<w:i/>');\n  if (allCaps) rPrParts.push('<w:caps/>');\n  if (color) rPrParts.push(`<w:color w:val=\"${color}\"/>`);\n  rPrParts.push(`<w:sz w:val=\"${size}\"/>`);\n  rPrParts.push(`<w:szCs w:val=\"${size}\"/>`);\n  if (charSpacing) rPrParts.push(`<w:spacing w:val=\"${charSpacing}\"/>`);\n  const runProps = `<w:rPr>${rPrParts.join('')}</w:rPr>`;\n\n  // Auch pPr darf rPr haben fuer Absatzmarken-Formatierung (fuer Borders/Abstaende wichtig)\n  const pPr = pPrParts.length\n    ? `<w:pPr>${pPrParts.join('')}<w:rPr>${rPrParts.join('')}</w:rPr></w:pPr>`\n    : '';\n\n  const runs = text\n    ? textToRuns(text, runProps)\n    : `<w:r>${runProps}<w:t xml:space=\"preserve\"></w:t></w:r>`;\n\n  return `<w:p>${pPr}${runs}</w:p>`;\n}\n\n// ---------------------------------------------------------------------\n// 3) NEWSLETTER-LAYOUT (Variante A: Editorial)\n// ---------------------------------------------------------------------\n\nconst DARKBLUE = \"1A2744\";\nconst BLUE = \"1E3A8A\";\nconst GRAY_META = \"5A6A8A\";\nconst GRAY_MUTED = \"7A8A9A\";\nconst TEXT_BLACK = \"222222\";\n\nfunction buildDocumentXml(data) {\n  const today = new Date();\n  const months = ['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];\n  const dateStr = today.getDate() + '. ' + months[today.getMonth()] + ' ' + today.getFullYear();\n  const ausgabeNr = today.toISOString().slice(0,10).replace(/-/g,'');\n\n  const parts = [];\n\n  // --- Haupttitel ---\n  parts.push(para({\n    text: 'Juristische Entwicklungen im Überblick',\n    font: 'Georgia', size: 44, bold: true, color: DARKBLUE,\n    spacingBefore: 400, spacingAfter: 120\n  }));\n  parts.push(para({\n    text: 'Spezialausgabe · Quellenanalyse · ' + dateStr,\n    font: 'Georgia', size: 22, italics: true, color: GRAY_META,\n    spacingAfter: 480\n  }));\n\n  // --- Lead / Themenuebersicht mit linker blauer Linie ---\n  parts.push(para({\n    text: data.themenuebersicht || '',\n    font: 'Georgia', size: 26, italics: true, color: DARKBLUE,\n    spacingAfter: 480, spacingLine: 360,\n    borderLeft: { color: BLUE, size: 18, space: 16 }\n  }));\n\n  // --- Artikel ---\n  const articles = Array.isArray(data.articles) ? data.articles : [];\n  articles.forEach((article, idx) => {\n    // Trenner zwischen Artikeln\n    if (idx > 0) {\n      parts.push(para({\n        text: '◆ ◆ ◆',\n        alignment: 'center', font: 'Georgia', size: 16, color: BLUE,\n        spacingBefore: 360, spacingAfter: 360\n      }));\n    }\n\n    // Kicker \"BEITRAG 1\"\n    parts.push(para({\n      text: 'BEITRAG ' + (article.nummer || (idx + 1)),\n      font: 'Arial', size: 16, bold: true, color: BLUE,\n      charSpacing: 60, spacingAfter: 120\n    }));\n\n    // Titel\n    parts.push(para({\n      text: article.titel || '',\n      font: 'Georgia', size: 36, bold: true, color: DARKBLUE,\n      spacingAfter: 120\n    }));\n\n    // Meta (Quelle/Datum)\n    parts.push(para({\n      text: article.quelle_datum || '',\n      font: 'Georgia', size: 20, italics: true, color: GRAY_META,\n      spacingAfter: 280\n    }));\n\n    // Sections\n    const section = (label, text) => {\n      parts.push(para({\n        text: label,\n        font: 'Arial', size: 18, bold: true, color: BLUE,\n        charSpacing: 40, allCaps: true,\n        spacingBefore: 240, spacingAfter: 80\n      }));\n      parts.push(para({\n        text: text || '',\n        font: 'Georgia', size: 22, color: TEXT_BLACK,\n        alignment: 'both',\n        spacingAfter: 120, spacingLine: 340\n      }));\n    };\n    section('Sachverhalt und Hintergrund', article.sachverhalt);\n    section('Entscheidung und Regelung', article.entscheidung_regelung);\n    section('Praktische Bedeutung', article.praktische_bedeutung);\n    section('Relevante Details', article.relevante_details);\n  });\n\n  if (!articles.length) {\n    parts.push(para({\n      text: 'Keine Artikel im Input gefunden.',\n      font: 'Georgia', size: 22, color: TEXT_BLACK\n    }));\n  }\n\n  // --- Disclaimer ---\n  parts.push(para({\n    text: '',\n    spacingBefore: 600,\n    borderTop: { color: 'CCCCCC', size: 6, space: 12 }\n  }));\n  parts.push(para({\n    text: 'Dieser Newsletter wurde automatisch erstellt. Alle Inhalte dienen ausschliesslich der allgemeinen Information und stellen keine Rechtsberatung dar.',\n    font: 'Georgia', size: 16, italics: true, color: GRAY_MUTED,\n    spacingBefore: 120\n  }));\n\n  // --- Section mit Header/Footer ---\n  const header = buildHeaderXml(dateStr);\n  const footer = buildFooterXml(ausgabeNr);\n\n  const sectPr = `\n    <w:sectPr>\n      <w:headerReference w:type=\"default\" r:id=\"rId10\"/>\n      <w:footerReference w:type=\"default\" r:id=\"rId11\"/>\n      <w:pgSz w:w=\"11906\" w:h=\"16838\"/>\n      <w:pgMar w:top=\"1600\" w:right=\"1800\" w:bottom=\"1600\" w:left=\"1800\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/>\n      <w:cols w:space=\"708\"/>\n      <w:docGrid w:linePitch=\"360\"/>\n    </w:sectPr>`;\n\n  const body = `\n<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"\n            xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">\n  <w:body>\n    ${parts.join('\\n')}\n    ${sectPr}\n  </w:body>\n</w:document>`;\n\n  return { body, header, footer };\n}\n\nfunction buildHeaderXml(dateStr) {\n  // Kopfzeile mit Marke links, Datum rechts, Linie drunter\n  const headerPara = `\n    <w:p>\n      <w:pPr>\n        <w:tabs>\n          <w:tab w:val=\"right\" w:pos=\"8306\"/>\n        </w:tabs>\n        <w:spacing w:after=\"80\"/>\n      </w:pPr>\n      <w:r>\n        <w:rPr>\n          <w:rFonts w:ascii=\"Georgia\" w:hAnsi=\"Georgia\"/>\n          <w:b/>\n          <w:color w:val=\"${DARKBLUE}\"/>\n          <w:spacing w:val=\"40\"/>\n          <w:sz w:val=\"20\"/>\n        </w:rPr>\n        <w:t>RECHTSNEWS</w:t>\n      </w:r>\n      <w:r>\n        <w:rPr><w:rFonts w:ascii=\"Georgia\" w:hAnsi=\"Georgia\"/></w:rPr>\n        <w:tab/>\n      </w:r>\n      <w:r>\n        <w:rPr>\n          <w:rFonts w:ascii=\"Georgia\" w:hAnsi=\"Georgia\"/>\n          <w:color w:val=\"${GRAY_META}\"/>\n          <w:sz w:val=\"18\"/>\n        </w:rPr>\n        <w:t xml:space=\"preserve\">${xmlEscape(dateStr)}</w:t>\n      </w:r>\n    </w:p>\n    <w:p>\n      <w:pPr>\n        <w:pBdr>\n          <w:bottom w:val=\"single\" w:sz=\"6\" w:space=\"1\" w:color=\"${DARKBLUE}\"/>\n        </w:pBdr>\n      </w:pPr>\n    </w:p>`;\n\n  return `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<w:hdr xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\n  ${headerPara}\n</w:hdr>`;\n}\n\nfunction buildFooterXml(ausgabeNr) {\n  // Fusszeile mit Seitenzahl zentriert\n  const footerPara = `\n    <w:p>\n      <w:pPr>\n        <w:jc w:val=\"center\"/>\n      </w:pPr>\n      <w:r>\n        <w:rPr>\n          <w:rFonts w:ascii=\"Georgia\" w:hAnsi=\"Georgia\"/>\n          <w:color w:val=\"${GRAY_MUTED}\"/>\n          <w:sz w:val=\"16\"/>\n        </w:rPr>\n        <w:t xml:space=\"preserve\">Juristischer Newsletter · Ausgabe ${xmlEscape(ausgabeNr)} · Seite </w:t>\n      </w:r>\n      <w:r>\n        <w:rPr>\n          <w:rFonts w:ascii=\"Georgia\" w:hAnsi=\"Georgia\"/>\n          <w:color w:val=\"${GRAY_MUTED}\"/>\n          <w:sz w:val=\"16\"/>\n        </w:rPr>\n        <w:fldChar w:fldCharType=\"begin\"/>\n      </w:r>\n      <w:r>\n        <w:rPr>\n          <w:rFonts w:ascii=\"Georgia\" w:hAnsi=\"Georgia\"/>\n          <w:color w:val=\"${GRAY_MUTED}\"/>\n          <w:sz w:val=\"16\"/>\n        </w:rPr>\n        <w:instrText xml:space=\"preserve\">PAGE</w:instrText>\n      </w:r>\n      <w:r><w:fldChar w:fldCharType=\"end\"/></w:r>\n    </w:p>`;\n\n  return `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<w:ftr xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\n  ${footerPara}\n</w:ftr>`;\n}\n\n// ---------------------------------------------------------------------\n// 4) ZIP-WRITER (ohne externe Pakete, nur zlib)\n// ---------------------------------------------------------------------\n// Eine .docx-Datei ist ein ZIP-Archiv. Wir bauen das ZIP von Hand\n// nach der PKZip-Spezifikation.\n\nfunction crc32(buf) {\n  let table = crc32.table;\n  if (!table) {\n    table = new Uint32Array(256);\n    for (let i = 0; i < 256; i++) {\n      let c = i;\n      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);\n      table[i] = c >>> 0;\n    }\n    crc32.table = table;\n  }\n  let crc = 0xFFFFFFFF;\n  for (let i = 0; i < buf.length; i++) {\n    crc = (crc >>> 8) ^ table[(crc ^ buf[i]) & 0xFF];\n  }\n  return (crc ^ 0xFFFFFFFF) >>> 0;\n}\n\nfunction dosDateTime(d) {\n  const dosTime =\n    ((d.getHours() & 0x1F) << 11) |\n    ((d.getMinutes() & 0x3F) << 5) |\n    ((Math.floor(d.getSeconds() / 2)) & 0x1F);\n  const dosDate =\n    (((d.getFullYear() - 1980) & 0x7F) << 9) |\n    (((d.getMonth() + 1) & 0x0F) << 5) |\n    (d.getDate() & 0x1F);\n  return { dosTime, dosDate };\n}\n\nfunction buildZip(files) {\n  // files = [{ name, data: Buffer }]\n  const now = new Date();\n  const { dosTime, dosDate } = dosDateTime(now);\n  const localChunks = [];\n  const centralChunks = [];\n  let offset = 0;\n\n  for (const f of files) {\n    const nameBuf = Buffer.from(f.name, 'utf-8');\n    const raw = Buffer.isBuffer(f.data) ? f.data : Buffer.from(f.data, 'utf-8');\n    const stored = raw;\n    const crc = crc32(raw);\n\n    // Local file header\n    const local = Buffer.alloc(30 + nameBuf.length);\n    let p = 0;\n    local.writeUInt32LE(0x04034b50, p); p += 4;         // signature\n    local.writeUInt16LE(20, p); p += 2;                 // version needed\n    local.writeUInt16LE(0x0800, p); p += 2;             // general purpose flag (UTF-8)\n    local.writeUInt16LE(0, p); p += 2;                  // method: store (no compression)\n    local.writeUInt16LE(dosTime, p); p += 2;\n    local.writeUInt16LE(dosDate, p); p += 2;\n    local.writeUInt32LE(crc, p); p += 4;\n    local.writeUInt32LE(stored.length, p); p += 4;\n    local.writeUInt32LE(raw.length, p); p += 4;\n    local.writeUInt16LE(nameBuf.length, p); p += 2;\n    local.writeUInt16LE(0, p); p += 2;                  // extra length\n    nameBuf.copy(local, p);\n\n    localChunks.push(local);\n    localChunks.push(stored);\n\n    // Central directory entry\n    const central = Buffer.alloc(46 + nameBuf.length);\n    p = 0;\n    central.writeUInt32LE(0x02014b50, p); p += 4;       // signature\n    central.writeUInt16LE(20, p); p += 2;               // version made by\n    central.writeUInt16LE(20, p); p += 2;               // version needed\n    central.writeUInt16LE(0x0800, p); p += 2;           // general purpose\n    central.writeUInt16LE(0, p); p += 2;                // method: store (no compression)\n    central.writeUInt16LE(dosTime, p); p += 2;\n    central.writeUInt16LE(dosDate, p); p += 2;\n    central.writeUInt32LE(crc, p); p += 4;\n    central.writeUInt32LE(stored.length, p); p += 4;\n    central.writeUInt32LE(raw.length, p); p += 4;\n    central.writeUInt16LE(nameBuf.length, p); p += 2;\n    central.writeUInt16LE(0, p); p += 2;                // extra length\n    central.writeUInt16LE(0, p); p += 2;                // comment length\n    central.writeUInt16LE(0, p); p += 2;                // disk number\n    central.writeUInt16LE(0, p); p += 2;                // internal attrs\n    central.writeUInt32LE(0, p); p += 4;                // external attrs\n    central.writeUInt32LE(offset, p); p += 4;           // local header offset\n    nameBuf.copy(central, p);\n\n    centralChunks.push(central);\n\n    offset += local.length + stored.length;\n  }\n\n  const centralDir = Buffer.concat(centralChunks);\n  const centralSize = centralDir.length;\n  const centralOffset = offset;\n\n  // End of central directory\n  const eocd = Buffer.alloc(22);\n  let p = 0;\n  eocd.writeUInt32LE(0x06054b50, p); p += 4;\n  eocd.writeUInt16LE(0, p); p += 2;                     // disk\n  eocd.writeUInt16LE(0, p); p += 2;                     // disk of central dir\n  eocd.writeUInt16LE(files.length, p); p += 2;\n  eocd.writeUInt16LE(files.length, p); p += 2;\n  eocd.writeUInt32LE(centralSize, p); p += 4;\n  eocd.writeUInt32LE(centralOffset, p); p += 4;\n  eocd.writeUInt16LE(0, p); p += 2;                     // comment length\n\n  return Buffer.concat([...localChunks, centralDir, eocd]);\n}\n\n// ---------------------------------------------------------------------\n// 5) DOCX ZUSAMMENBAUEN (alle noetigen Begleitdateien)\n// ---------------------------------------------------------------------\n\nfunction buildDocx(data) {\n  const { body, header, footer } = buildDocumentXml(data);\n\n  const contentTypes = `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\n  <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\n  <Default Extension=\"xml\" ContentType=\"application/xml\"/>\n  <Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>\n  <Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>\n  <Override PartName=\"/word/header1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml\"/>\n  <Override PartName=\"/word/footer1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml\"/>\n</Types>`;\n\n  const rels = `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\n  <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/>\n</Relationships>`;\n\n  const documentRels = `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\n  <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>\n  <Relationship Id=\"rId10\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/header\" Target=\"header1.xml\"/>\n  <Relationship Id=\"rId11\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer\" Target=\"footer1.xml\"/>\n</Relationships>`;\n\n  const styles = `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\n  <w:docDefaults>\n    <w:rPrDefault>\n      <w:rPr>\n        <w:rFonts w:ascii=\"Georgia\" w:hAnsi=\"Georgia\" w:cs=\"Georgia\"/>\n        <w:sz w:val=\"22\"/>\n        <w:szCs w:val=\"22\"/>\n      </w:rPr>\n    </w:rPrDefault>\n    <w:pPrDefault>\n      <w:pPr>\n        <w:spacing w:after=\"120\" w:line=\"300\" w:lineRule=\"auto\"/>\n      </w:pPr>\n    </w:pPrDefault>\n  </w:docDefaults>\n  <w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\">\n    <w:name w:val=\"Normal\"/>\n    <w:qFormat/>\n  </w:style>\n</w:styles>`;\n\n  const documentXml = `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n${body}`;\n\n  const files = [\n    { name: '[Content_Types].xml', data: contentTypes },\n    { name: '_rels/.rels', data: rels },\n    { name: 'word/_rels/document.xml.rels', data: documentRels },\n    { name: 'word/document.xml', data: documentXml },\n    { name: 'word/styles.xml', data: styles },\n    { name: 'word/header1.xml', data: header },\n    { name: 'word/footer1.xml', data: footer }\n  ];\n\n  return buildZip(files);\n}\n\n// ---------------------------------------------------------------------\n// 6) n8n-INTEGRATION\n// ---------------------------------------------------------------------\n\nconst input = $input.first()?.json ?? {};\n\nconst llmRaw =\n  input?.choices?.[0]?.message?.content ??\n  input?.output ??\n  input?.text ??\n  '{}';\n\nconst data = parseNewsletterJson(llmRaw);\n\nconst docxBuffer = buildDocx(data);\n\nconst heute = new Date().toISOString().slice(0, 10);\nconst filename = 'newsletter_url_' + heute + '.docx';\n\nconst binaryData = await this.helpers.prepareBinaryData(\n  docxBuffer,\n  filename,\n  'application/vnd.openxmlformats-officedocument.wordprocessingml.document'\n);\n\nreturn [{\n  json: { filename },\n  binary: { data: binaryData }\n}];\n"
+      },
+      "id": "4844c687-d3b4-485b-8162-bd8d072d7407",
+      "name": "4a. Newsletter HTML erstellen1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        -512
+      ],
+      "notesInFlow": true,
+      "notes": "Parst LLM-JSON und baut Newsletter-HTML fuer Gotenberg."
+    },
+    {
+      "parameters": {
+        "jsCode": "const buf = await this.helpers.getBinaryDataBuffer(0, 'data');\nconst heute = new Date().toISOString().slice(0, 10);\n\nreturn [{\n  json: {\n    newsletter_base64: buf.toString('base64'),\n    newsletter_filename: `newsletter_url_${heute}.docx`,\n    newsletter_mimetype: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'\n  }\n}];"
+      },
+      "id": "7c615ab2-4f8d-4643-a675-17230a3ffc24",
+      "name": "7a. Base64: Newsletter1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        -512
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "id": "a115b668-e5d8-4c22-9a33-f2ab445216f3",
+      "name": "8. Ergebnisse zusammenfuehren1",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        496,
+        -288
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "=define",
+        "text": "=={{\n(() => {\n  const all = $input.all();\n\n  const blocks = all\n    .map((item, i) => {\n      const text =\n        item.json.markdown ??\n        item.json.text ??\n        item.json.pages?.map(p => p.markdown).join(\"\\n\\n\") ??\n        \"\";\n\n      const fileName =\n        item.json.fileName ??\n        item.json.name ??\n        `Quelle ${i + 1}`;\n\n      return text\n        ? `===== QUELLE ${i + 1}: ${fileName} =====\\n${text}`\n        : \"\";\n    })\n    .filter(Boolean);\n\n  return [\n    \"Hier die Quellen, welche zu einem Newsletter verarbeitet werden sollen. Achte auf dein System Prompt:\",\n    ...blocks,\n  ].join(\"\\n\\n\");\n})()\n}}",
+        "options": {
+          "systemMessage": "System Prompt für den AI Agent \"Newsletter generieren\"\nDu bist ein erfahrener juristischer Redakteur für einen Fach-Newsletter.\nDeine Aufgabe ist es, aus mehreren Quellen (Urteile, Gesetzesänderungen,\nFachartikel) einen professionellen Newsletter für Anwälte, Kanzleien und\njuristisch interessierte Leser zu erstellen.\n\nDeine Aufgabe\nAus den bereitgestellten Quellen erstellst du einen strukturierten Newsletter,\nder:\n\nmehrere juristische Themen als separate Artikel aufbereitet\nfür ein Fachpublikum verständlich und präzise formuliert ist\nden Stand der Rechtslage korrekt wiedergibt (keine Spekulation)\npraktisch verwertbare Informationen liefert\ndie wichtigsten Details kompakt zusammenfasst\n\nUmgang mit den Quellen\nDie Quellen kommen als kompletter, unbearbeiteter Seitentext — oft mehrere\ntausend Zeichen pro Quelle, inklusive Seiten-Boilerplate (Navigation,\nCookie-Hinweise, Footer, Impressum).\n\nBeim Lesen:\n\nTrenne juristischen Kerninhalt von Website-Beiwerk\nIgnoriere Navigation, Cookie-Banner, \"Skip to content\", Impressum, Footer\nFokussiere auf: Aktenzeichen, Datum, Gericht, Sachverhalt, Entscheidung,\nLeitsätze, einschlägige Normen\nBei sehr langen Urteilen: Tenor, Leitsätze und tragende Gründe haben Priorität\nQuellen mit ok: false oder Text in eckigen Klammern (z.B. \"[Fallback\nfehlgeschlagen]\") sind Fehler und werden komplett ignoriert\nQuellen, die nur aus JS-Wall, Cookie-Banner oder Navigation bestehen, werden\nübersprungen\n\nPro QUELLE = genau ein Artikel. Die Anzahl der Artikel MUSS der Anzahl der \nverwertbaren QUELLEN entsprechen. Mehrere Artikel zum gleichen Thema nicht \nzusammenfassen, sondern beibehalten. Starred-Quellen (starred: true) sollten \nprominent behandelt werden — aber auch nicht-markierte Quellen kommen in den \nNewsletter.\n\nAusgabeformat (STRIKT EINHALTEN)\nDu antwortest AUSSCHLIESSLICH mit einem gültigen JSON-Objekt in dieser Struktur:\n{\n\"themenuebersicht\": \"Kurzer Teaser-Text, der die Themen der Ausgabe zusammenfasst (2-3 Sätze, max. 400 Zeichen).\",\n\"articles\": [\n{\n\"nummer\": \"1\",\n\"titel\": \"Prägnanter Titel des Artikels\",\n\"quelle_datum\": \"Gericht/Quelle, Datum, Aktenzeichen\",\n\"sachverhalt\": \"Worum ging es? Was war der Ausgangspunkt?\",\n\"entscheidung_regelung\": \"Was wurde entschieden oder geregelt? Konkret und korrekt.\",\n\"praktische_bedeutung\": \"Was bedeutet das für die Praxis? Was sollten Leser daraus mitnehmen?\",\n\"relevante_details\": \"Weitere wichtige Aspekte, Begründung, Hintergrund, offene Fragen.\"\n}\n]\n}\n\nWICHTIG:\n\nKEINE Markdown-Codefences (kein json, kein )\nKEINE Einleitung wie \"Hier ist der Newsletter:\"\nKEINE Erklärung nach dem JSON\nNur das reine JSON-Objekt, nichts davor, nichts danach\nAlle Zeilenumbrüche in Strings als \\n escapen\nAnführungszeichen in Strings als \\\" escapen\nKeine echten Newlines innerhalb der JSON-String-Werte\n\nRegeln für themenuebersicht\n\n2 bis 3 Sätze, max. 400 Zeichen\nNennt die behandelten Rechtsgebiete oder Themen\nWeckt Interesse ohne zu werben\nKEIN \"In dieser Ausgabe erfahren Sie...\" — direkter einsteigen\nBeispiel: \"Der BGH präzisiert die Anforderungen an Widerrufsbelehrungen\nbei Autokrediten. Das OLG München entscheidet zur Mangelhaftung bei\nSoftware-Updates. Neu im Arbeitsrecht: Die Betriebsratsvergütung nach\nder jüngsten Gesetzesänderung.\"\n\nRegeln für articles\nAnzahl: GENAU ein Artikel pro verwertbarer QUELLE. Bei N verwertbaren Quellen \nMUSS das articles-Array N Einträge haben. Niemals Quellen überspringen, \nzusammenfassen oder weglassen, es sei denn sie sind nachweislich unverwertbar \n(siehe \"Umgang mit den Quellen\").\nnummer: Fortlaufend als String (\"1\", \"2\", \"3\"), mit starred-Quellen zuerst,\ndanach absteigend nach Relevanz/Aktualität.\ntitel:\n\n40-90 Zeichen\nKonkret, nicht werblich\nNennt idealerweise Gericht und Kerninhalt\nBeispiele:\n\n\"OLG Stuttgart: Wertersatz nach Widerruf eines Autokredits\"\n\"Neufassung § 79a BetrVG — Klarstellung zur Betriebsratsvergütung\"\n\n\nKeine Floskeln wie \"Spannendes Urteil zu...\", \"Wegweisende Entscheidung...\"\n\nquelle_datum:\n\nFormat: \"Gericht/Quelle, Datum, Az.\"\nBeispiel: \"OLG Stuttgart, Urteil vom 14.04.2026, Az. 6 U 225/22\"\nBei Gesetzen: \"Bundesgesetzblatt, [Datum], [Fundstelle]\"\nWenn eine Angabe fehlt: weglassen, nicht erfinden\nWenn gar keine Quelle erkennbar: URL in Kurzform nennen\n\nsachverhalt:\n\n3-5 Sätze\nBeantwortet: Was war passiert? Wer klagte gegen wen? Worum ging es?\nKeine Juristenfachsprache ohne Not — verständlich bleiben\nKeine Bewertung, nur Fakten\n\nentscheidung_regelung:\n\n3-5 Sätze\nBeantwortet: Was wurde entschieden? Welche Norm gilt wie?\nTenor präzise wiedergeben, relevante Paragrafen nennen (z.B. \"§ 357 BGB\")\nBei Urteilen: Wer gewinnt, wer verliert, in welchem Umfang\n\npraktische_bedeutung:\n\n2-4 Sätze\nDer wichtigste Abschnitt — was nimmt der Leser mit?\nKonkrete Handlungsempfehlungen oder Konsequenzen\nFür wen besonders relevant? Verbraucher, Unternehmer, Anwälte einer Fachrichtung?\n\nrelevante_details:\n\n2-5 Sätze\nBegründung des Gerichts in Kurzform\nAbweichungen zur bisherigen Rechtsprechung\nNoch offene Fragen oder erwartete Revisionen\nHistorischer Kontext, wenn relevant\n\nStilregeln für ALLE Textfelder\nSchreibweise:\n\nSachlich und präzise, aber nicht trocken\nAktive Formulierungen bevorzugen\nSie-Form oder neutrale Formulierungen, keine Du-Form\nKeine Ich-Form, keine Wir-Form (\"wir meinen...\")\nKeine werbenden Aussagen über eine Kanzlei\n\nVerboten:\n\n\"In einem bemerkenswerten Urteil...\"\n\"Dieses wegweisende Urteil zeigt...\"\n\"Wie allgemein bekannt...\"\n\"Selbstverständlich gilt...\"\nKonjunktiv-Kaskaden (\"es könnte sein, dass möglicherweise...\")\nSpekulation über nicht im Urteil enthaltene Aspekte\n\nFachsprache:\n\nParagrafen immer mit § (nicht \"Paragraph\")\nGerichte ausschreiben (nicht \"BGH\" nur, sondern beim Ersterwähnen\n\"Bundesgerichtshof (BGH)\")\nAktenzeichen in Originalformat\nDatumsformat: TT.MM.JJJJ\n\nWenn keine verwertbaren Quellen vorliegen\nFalls alle Quellen unbrauchbar sind (nur Cookie-Banner, JS-Wall-Meldungen,\nFehler), antworte mit:\n{\n\"themenuebersicht\": \"Keine verwertbaren Quellen konnten für diese Ausgabe abgerufen werden.\",\n\"articles\": []\n}\n\nInput\nDie Quellen werden als nummerierte Textblöcke im folgenden Format übergeben:\n\n===== QUELLE 1: dateiname.pdf =====\n[Volltext der ersten Quelle]\n\n===== QUELLE 2: dateiname.pdf =====\n[Volltext der zweiten Quelle]\n\nJede QUELLE ist eine eigenständige Rechtsquelle (typischerweise ein PDF-Dokument\noder eine Webseite) und MUSS als separater Artikel im Newsletter erscheinen, \nsofern sie verwertbaren juristischen Inhalt enthält.\n\nZWINGEND: Du MUSST für JEDE verwertbare QUELLE einen eigenen Artikel erstellen. \nWenn 2 Quellen übergeben werden, enthält articles 2 Einträge. Wenn 5 Quellen \nübergeben werden, enthält articles 5 Einträge. Fasse niemals mehrere Quellen zu \neinem Artikel zusammen. Überspringe niemals eine Quelle, es sei denn sie enthält \nkeinen juristischen Inhalt (nur Leerzeichen, Fehlertext, Cookie-Banner o.ä.).\n\nBei älteren Versionen dieses Prompts wurden Quellen als JSON-Array \"fetched_urls\" \nmit Feldern wie url, text, starred, ok, method, length übergeben. Falls dieses \nFormat auftritt, gelten dieselben Regeln: Pro Eintrag ein Artikel."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -880,
+        -608
+      ],
+      "id": "a596e583-5391-4a2a-ad32-0a2e339b0b8d",
+      "name": "AI Agent3",
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nlet result = { status: 'success' };\nfor (const item of items) {\n  Object.assign(result, item.json);\n}\nreturn [{ json: result }];\n"
+      },
+      "id": "67723f04-ae2c-4cef-b53a-77c5ac104c05",
+      "name": "9. Response bauen1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "url-newsletter-generate-2",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "https://<ihr-frontend-host>"
+        }
+      },
+      "id": "4a7788d0-b09b-442d-a2f2-5bd7673224a5",
+      "name": "Webhook1",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1552,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nlet result = { status: 'success' };\nfor (const item of items) {\n  Object.assign(result, item.json);\n}\nreturn [{ json: result }];\n"
+      },
+      "id": "d4b778b2-187d-446b-a287-393052a71d4f",
+      "name": "9. Response bauen2",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        -288
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "claude-sonnet-4-5-20250929",
+          "cachedResultName": "Claude Sonnet 4.5"
+        },
+        "options": {
+          "maxTokensToSample": 8000,
+          "temperature": 0.3
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        -816,
+        -384
+      ],
+      "id": "c604a0ea-a7a7-4c29-b5d0-0ded94b30771",
+      "name": "Anthropic Chat Model",
+      "credentials": {
+        "anthropicApi": {
+          "id": "dJO0wfHtA0d8q0xA",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const out = [];\n\nfor (const item of $input.all()) {\n  const binaries = item.binary ?? {};\n\n  for (const [key, file] of Object.entries(binaries)) {\n    out.push({\n      json: {\n        ...item.json,\n        originalField: key,\n        fileName: file.fileName,\n      },\n      binary: {\n        data: file, // 🔥 hier wird alles auf \"data\" gesetzt\n      },\n    });\n  }\n}\n\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1328,
+        -144
+      ],
+      "id": "09f4ca6d-34bc-4792-82ef-210423a8e093",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "options": {
+          "reset": false
+        }
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -1104,
+        -144
+      ],
+      "id": "432162e4-b7ae-4eef-abc8-0e4df037ffcf",
+      "name": "Loop Over Items"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const staticData = $getWorkflowStaticData('global');\n\n// Sammelliste initialisieren\nif (!Array.isArray(staticData.pdfResults)) {\n  staticData.pdfResults = [];\n}\n\nconst current = $input.first().json;\n\n// Das hier anpassen, je nachdem was dein vorheriger Node liefert\nconst result = {\n  fileName: current.fileName ?? null,\n  sourceBinaryField: current.sourceBinaryField ?? null,\n  extractedText: current.text ?? current.extractedText ?? current.content ?? '',\n  linkedin_post_text: current.linkedin_post_text ?? '',\n  linkedin_hashtags: current.linkedin_hashtags ?? [],\n  linkedin_char_count: current.linkedin_char_count ?? null,\n};\n\n// Aktuelles PDF anhängen\nstaticData.pdfResults.push(result);\n\nreturn [\n  {\n    json: {\n      ...current,\n      pdfResultsSoFar: staticData.pdfResults,\n      pdfResultsCount: staticData.pdfResults.length,\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -544,
+        816
+      ],
+      "id": "1e7a5909-212c-471c-a596-e86c16b4bc89",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mistralAi",
+      "typeVersion": 1,
+      "position": [
+        -800,
+        0
+      ],
+      "id": "40efc17d-5493-48ea-b4a1-803ff6b1a601",
+      "name": "Extract text",
+      "credentials": {
+        "mistralCloudApi": {
+          "id": "6IXVK6CTGOxjClUR",
+          "name": "Mistral Cloud account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 60
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -672,
+        -112
+      ],
+      "id": "ecc23e98-655e-408f-9ba4-5139d6bdb68b",
+      "name": "Wait"
+    }
+  ],
+  "connections": {
+    "Anthropic Chat Model1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent2",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent2": {
+      "main": [
+        [
+          {
+            "node": "4b. LinkedIn Text aufbereiten1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4b. LinkedIn Text aufbereiten1": {
+      "main": [
+        [
+          {
+            "node": "9. Response bauen1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4a. Newsletter HTML erstellen1": {
+      "main": [
+        [
+          {
+            "node": "7a. Base64: Newsletter1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "7a. Base64: Newsletter1": {
+      "main": [
+        [
+          {
+            "node": "8. Ergebnisse zusammenfuehren1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent3": {
+      "main": [
+        [
+          {
+            "node": "4a. Newsletter HTML erstellen1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "9. Response bauen1": {
+      "main": [
+        [
+          {
+            "node": "8. Ergebnisse zusammenfuehren1",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "8. Ergebnisse zusammenfuehren1": {
+      "main": [
+        [
+          {
+            "node": "9. Response bauen2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook1": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "9. Response bauen2": {
+      "main": [
+        [
+          {
+            "node": "10. Respond to Webhook1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent3",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [
+          {
+            "node": "AI Agent3",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extract text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        []
+      ]
+    },
+    "Extract text": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "AI Agent2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  }
+}

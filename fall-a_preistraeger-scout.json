@@ -1,0 +1,769 @@
+{
+  "name": "Fall A - Preistraeger Scout",
+  "nodes": [
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "kategorie",
+              "value": "=Mittelständler",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "serpapi_key",
+              "value": "={{ $env.SERPAPI_KEY }}",
+              "type": "string"
+            },
+            {
+              "id": "a3",
+              "name": "anthropic_api_key",
+              "value": "={{ $env.ANTHROPIC_API_KEY }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "05fd2ff4-ab91-4e90-83be-dbb25c8bf8e0",
+      "name": "Konfiguration5",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -2496,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Schritt 2: Gewinner-Seiten scrapen - immer alle eingegebenen Seiten\nconst input = $input.first().json;\nif (input.error) return [{ json: input }];\n\nconst pages = input.pages || [];\nconst scrapedPages = [];\nconst skippedPages = [];\n\nfor (const page of pages) {\n  if (!page.url) {\n    skippedPages.push({\n      url: '',\n      title: page.title || '',\n      reason: 'Keine URL'\n    });\n    continue;\n  }\n\n  try {\n    let html = await this.helpers.httpRequest({\n      method: 'GET',\n      url: page.url,\n      encoding: 'utf-8',\n      timeout: 10000,\n      json: false\n    });\n\n    if (typeof html !== 'string') html = String(html);\n\n    const text = html\n      .replace(/<script[^>]*>[\\s\\S]*?<\\/script>/gi, '')\n      .replace(/<style[^>]*>[\\s\\S]*?<\\/style>/gi, '')\n      .replace(/<[^>]+>/g, ' ')\n      .replace(/&nbsp;/g, ' ')\n      .replace(/&amp;/g, '&')\n      .replace(/&ouml;/g, 'oe').replace(/&Ouml;/g, 'Oe')\n      .replace(/&auml;/g, 'ae').replace(/&Auml;/g, 'Ae')\n      .replace(/&uuml;/g, 'ue').replace(/&Uuml;/g, 'Ue')\n      .replace(/&szlig;/g, 'ss')\n      .replace(/\\s+/g, ' ')\n      .trim()\n      .substring(0, 15000);\n\n    if (text.length > 200) {\n      scrapedPages.push({\n        url: page.url,\n        title: page.title || '',\n        text\n      });\n    } else {\n      skippedPages.push({\n        url: page.url,\n        title: page.title || '',\n        reason: `Zu wenig Text (${text.length} Zeichen)`\n      });\n    }\n  } catch (e) {\n    skippedPages.push({\n      url: page.url,\n      title: page.title || '',\n      reason: e.message || String(e)\n    });\n  }\n}\n\nif (scrapedPages.length === 0) {\n  return [{\n    json: {\n      error: 'Keine Seiten geladen',\n      total_input_pages: pages.length,\n      scraped_count: 0,\n      skipped_count: skippedPages.length,\n      skipped_pages: skippedPages\n    }\n  }];\n}\n\nreturn [{\n  json: {\n    total_input_pages: pages.length,\n    scraped_count: scrapedPages.length,\n    skipped_count: skippedPages.length,\n    scraped_pages: scrapedPages,\n    skipped_pages: skippedPages,\n    kategorie: input.kategorie,\n    anthropic_api_key: input.anthropic_api_key\n  }\n}];"
+      },
+      "id": "a1d0decd-d51a-4bbe-b968-5e23b44010bb",
+      "name": "Gewinner-Seiten scrapen5",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2048,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Schritt 3: Claude extrahiert Name, Preis, Website\nconst input = $input.first().json;\nif (input.error) return [{json: input}];\n\nconst pages = input.scraped_pages || [];\nconst apiKey = input.anthropic_api_key;\n\nlet prompt = 'Du analysierst Webseiten die Preistraeger von Wirtschaftspreisen auflisten.\\n';\nprompt += 'Kategorie: ' + input.kategorie + '\\n\\n';\nprompt += 'AUFGABE: Extrahiere ALLE preisgekroenten UNTERNEHMEN.\\n\\n';\nprompt += 'Fuer jedes Unternehmen extrahiere GENAU 3 Felder:\\n';\nprompt += '- name: Offizieller Firmenname mit Rechtsform (z.B. Mustermann GmbH)\\n';\nprompt += '- preis: Exakter Name des gewonnenen Preises (z.B. Grosser Preis des Mittelstandes 2025)\\n';\nprompt += '- website: Finde die offizielle Firmen-Website im TEXT. Wenn du keine im TEXT findest, dann nutze deine Expertise und finde eine passende Webseite passende. Du musst eine Webseite finden.\\n\\n';\nprompt += 'WICHTIGE REGELN:\\n';\nprompt += '- NUR Unternehmen/Firmen, KEINE Verbaende, Stiftungen, Kammern, Hochschulen, Behoerden, Einzelpersonen\\n';\nprompt += '- KEINE Duplikate\\n';\nprompt += '- So viele Unternehmen wie du nur finden kannst. Am besten mal mindestens 50.\\n';\nprompt += '- Wenn die Website im Text steht, gib sie MIT https:// an\\n';\nprompt += '- Antworte AUSSCHLIESSLICH mit einem JSON-Array, kein Text davor oder danach\\n\\n';\nprompt += 'Format: [{\"name\": \"Firma GmbH\", \"preis\": \"Preisname 2025\", \"website\": \"https://www.firma.de\"}]\\n\\n';\nprompt += '--- WEBSEITEN-TEXTE ---\\n\\n';\n\nfor (const page of pages) {\n  prompt += '=== ' + page.title + ' ===\\n';\n  prompt += page.text.substring(0, 12000) + '\\n\\n';\n}\n\ntry {\n  const response = await this.helpers.httpRequest({\n    method: 'POST',\n    url: 'https://api.anthropic.com/v1/messages',\n    headers: {\n      'x-api-key': apiKey,\n      'anthropic-version': '2023-06-01',\n      'content-type': 'application/json'\n    },\n    body: {\n      model: 'claude-haiku-4-5-20251001',\n      max_tokens: 8192,\n      messages: [{role: 'user', content: prompt}]\n    },\n    json: true,\n    timeout: 180000\n  });\n\n  let text = (response.content && response.content[0]) ? response.content[0].text : '';\n\n  let companies = [];\n  try {\n    const match = text.match(/\\[[\\s\\S]*\\]/);\n    if (match) companies = JSON.parse(match[0]);\n  } catch (e) {\n    return [{json: {error: 'JSON Parse Fehler', raw: text.substring(0, 2000)}}];\n  }\n\n  // Deduplizieren + max 30\n  const seen = new Set();\n  const unique = [];\n  for (const c of companies) {\n    const key = (c.name || '').toLowerCase().trim();\n    if (key && !seen.has(key)) {\n      seen.add(key);\n      unique.push(c);\n    }\n  }\n\n  if (unique.length === 0) {\n    return [{json: {error: 'Keine Unternehmen gefunden', raw: text.substring(0, 2000)}}];\n  }\n\n  return unique.slice(0, 100).map(c => ({\n    json: {\n      name: c.name || '',\n      preis: c.preis || '',\n      website: (c.website && c.website.length > 3) ? c.website : ''\n    }\n  }));\n} catch (e) {\n  return [{json: {error: 'Claude API Fehler: ' + (e.message || String(e))}}];\n}"
+      },
+      "id": "80e6ed43-35f1-4442-9d7b-2d3d1d76b052",
+      "name": "KI - Unternehmen extrahieren5",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1824,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 5,
+        "options": {}
+      },
+      "id": "dcce6ce9-eaf5-41a2-8193-c592d67a55f1",
+      "name": "Batch Loop (10 Firmen)2",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -1600,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "options": {
+          "fileName": "preistraeger_ergebnisse.xlsx"
+        }
+      },
+      "id": "280a760a-2606-46d1-8ea3-7761c0a7747f",
+      "name": "Excel-Datei erstellen4",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        -1376,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.website }}/impressum",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -1376,
+        192
+      ],
+      "id": "83e4f47a-a13c-4569-a852-880b482c231b",
+      "name": "HTTP Request1",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst sourceItems = $('Batch Loop (10 Firmen)2').all();\n\nconst emailRegex = /[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}/g;\n\nconst badPatterns = [\n  'example', 'wixpress', 'sentry', 'webpack', 'cloudflare', 'w3.org',\n  'schema.org', 'googleapis', 'jquery', 'bootstrap', 'fontawesome',\n  'wordpress', 'gravatar', 'noreply', 'no-reply', 'unsubscribe',\n  'mailer-daemon', 'cookiebot', 'usercentrics', 'tracking', 'pixel',\n  'cdn', 'placeholder', 'github', 'npmjs', 'gstatic'\n];\n\nconst prio = [\n  'info@', 'kontakt@', 'contact@', 'office@', 'mail@',\n  'hello@', 'post@', 'service@', 'team@'\n];\n\nfunction decodeHtmlEntities(str) {\n  if (!str || typeof str !== 'string') return '';\n  return str\n    .replace(/&#(\\d+);/g, (_, c) => String.fromCharCode(parseInt(c, 10)))\n    .replace(/&#x([0-9a-fA-F]+);/g, (_, c) => String.fromCharCode(parseInt(c, 16)))\n    .replace(/&commat;/gi, '@')\n    .replace(/&period;/gi, '.')\n    .replace(/&dot;/gi, '.')\n    .replace(/&nbsp;/gi, ' ')\n    .replace(/&amp;/gi, '&')\n    .replace(/&quot;/gi, '\"')\n    .replace(/&#64;/g, '@');\n}\n\nfunction normalizeObfuscation(str) {\n  if (!str || typeof str !== 'string') return '';\n  return str\n    .replace(/\\s*\\[at\\]\\s*/gi, '@')\n    .replace(/\\s*\\(at\\)\\s*/gi, '@')\n    .replace(/\\s+at\\s+/gi, '@')\n    .replace(/\\s*\\[dot\\]\\s*/gi, '.')\n    .replace(/\\s*\\(dot\\)\\s*/gi, '.')\n    .replace(/\\s+dot\\s+/gi, '.');\n}\n\nfunction cleanEmail(email) {\n  if (!email) return '';\n  return email\n    .replace(/^mailto:/i, '')\n    .replace(/[?].*$/, '')\n    .replace(/[<>\"'(),;]+$/g, '')\n    .trim();\n}\n\nfunction getHost(url) {\n  try {\n    return new URL(url).hostname.replace(/^www\\./, '').toLowerCase();\n  } catch (e) {\n    return '';\n  }\n}\n\nfunction isBadEmail(email) {\n  const l = email.toLowerCase();\n\n  if (!l.includes('@')) return true;\n  if (l.length > 80) return true;\n  if (badPatterns.some(b => l.includes(b))) return true;\n\n  if (\n    l.endsWith('.png') || l.endsWith('.jpg') || l.endsWith('.jpeg') ||\n    l.endsWith('.js') || l.endsWith('.css') || l.endsWith('.svg') ||\n    l.endsWith('.gif') || l.endsWith('.woff') || l.endsWith('.map')\n  ) return true;\n\n  return false;\n}\n\nfunction extractBestEmail(html, websiteHost = '') {\n  if (!html || typeof html !== 'string') return '';\n\n  const decoded = normalizeObfuscation(decodeHtmlEntities(html));\n\n  const mailtoMatches = [...decoded.matchAll(/mailto:([^\\s\"'<>?]+)/gi)].map(m => m[1]);\n  const rawMatches = decoded.match(emailRegex) || [];\n\n  let emails = [...new Set([...mailtoMatches, ...rawMatches].map(cleanEmail))].filter(Boolean);\n  emails = emails.filter(e => !isBadEmail(e));\n\n  if (emails.length === 0) return '';\n\n  function scoreEmail(email) {\n    const l = email.toLowerCase();\n    let score = 0;\n\n    for (let i = 0; i < prio.length; i++) {\n      if (l.startsWith(prio[i])) {\n        score += (prio.length - i) * 100;\n        break;\n      }\n    }\n\n    const domain = (l.split('@')[1] || '').replace(/^www\\./, '');\n    if (websiteHost && domain === websiteHost) score += 80;\n    if (websiteHost && domain.endsWith('.' + websiteHost)) score += 60;\n    if (l.startsWith('datenschutz@') || l.startsWith('privacy@')) score -= 20;\n\n    return score;\n  }\n\n  emails.sort((a, b) => scoreEmail(b) - scoreEmail(a));\n  return emails[0];\n}\n\nreturn items.map((item, index) => {\n  const src = sourceItems[index]?.json || {};\n\n  const html = item.json.data || '';\n  const host = getHost(src.website || '');\n\n  const email = extractBestEmail(html, host);\n\n  return {\n    json: {\n      name: src.name || '',\n      preis: src.preis || '',\n      website: src.website || '',\n      email: email || ''\n    },\n    pairedItem: index\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1152,
+        272
+      ],
+      "id": "0df0258a-0a51-4720-ad23-74dd763dacb4",
+      "name": "Code in JavaScript",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "jsCode": "// Schritt 1: 5x SerpAPI-Suche basierend auf Kategorie\nconst config = $input.first().json;\nconst apiKey = config.serpapi_key;\nconst kat = config.kategorie;\n\nconst searchQueries = [\n  kat + ' Preis 2026 Preistraeger Gewinner',\n  kat + ' Preis 2025 Preistraeger Gewinner Liste',\n  kat + ' Auszeichnung 2025 Unternehmen Gewinner',\n  'Deutscher ' + kat + ' Preis Preistraeger Liste',\n  kat + ' Award Deutschland Gewinner Unternehmen'\n];\n\nconst allPages = [];\nconst seenUrls = new Set();\n\nfor (const q of searchQueries) {\n  try {\n    const response = await this.helpers.httpRequest({\n      method: 'GET',\n      url: 'https://serpapi.com/search.json',\n      qs: { api_key: apiKey, engine: 'google', q: q, num: 10, gl: 'de', hl: 'de' }\n    });\n    for (const r of (response.organic_results || []).slice(0, 7)) {\n      const url = r.link || '';\n      if (url && !seenUrls.has(url)) {\n        seenUrls.add(url);\n        allPages.push({ url, title: r.title || '', snippet: r.snippet || '' });\n      }\n    }\n  } catch (e) {}\n}\n\nif (allPages.length === 0) {\n  return [{json: {error: 'Keine Suchergebnisse'}}];\n}\n\nreturn [{\n  json: {\n    pages: allPages,\n    kategorie: kat,\n    anthropic_api_key: config.anthropic_api_key\n  }\n}];"
+      },
+      "id": "94e70b7f-2725-4e8d-82b0-ed9b1ad063e7",
+      "name": "Multi-Suche (5x SerpAPI)5",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2272,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "kategorie",
+              "value": "={{ $json.body.chatInput }}",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "brave_api_key",
+              "value": "={{ $env.BRAVE_API_KEY }}",
+              "type": "string"
+            },
+            {
+              "id": "a3",
+              "name": "anthropic_api_key",
+              "value": "={{ $env.ANTHROPIC_API_KEY }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "50c630cf-a9b4-463a-97ad-05a808e09073",
+      "name": "Konfiguration",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -2272,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const config = $input.first().json;\nconst braveKey = config.brave_api_key;\nconst kat = config.kategorie;\n\nconst braveQueries = [\n  kat + ' Preis 2026 Preistraeger Gewinner',\n  kat + ' Preis 2025 Preistraeger Gewinner Liste',\n  kat + ' Auszeichnung 2025 Unternehmen Gewinner',\n  'Deutscher ' + kat + ' Preis Preistraeger Liste',\n  kat + ' Award Deutschland Gewinner Unternehmen'\n];\nconst newsQueries = [\n  kat + ' Preis Preistraeger Gewinner 2025',\n  kat + ' Award Gewinner Deutschland 2025',\n  kat + ' Auszeichnung Unternehmen 2025'\n];\n\nconst allPages = [];\nconst seenUrls = new Set();\n\nfor (const q of braveQueries) {\n  try {\n    const res = await this.helpers.httpRequest({\n      method: 'GET',\n      url: 'https://api.search.brave.com/res/v1/web/search',\n      headers: { 'Accept': 'application/json', 'Accept-Encoding': 'gzip', 'X-Subscription-Token': braveKey },\n      qs: { q, count: 10, country: 'de', search_lang: 'de', ui_lang: 'de-DE' }\n    });\n    for (const r of ((res.web || {}).results || []).slice(0, 7)) {\n      const url = r.url || '';\n      if (url && !seenUrls.has(url)) { seenUrls.add(url); allPages.push({ url, title: r.title || '', snippet: r.description || '' }); }\n    }\n  } catch (e) {}\n}\n\nfor (const q of newsQueries) {\n  try {\n    const rssXml = await this.helpers.httpRequest({\n      method: 'GET',\n      url: 'https://news.google.com/rss/search?q=' + encodeURIComponent(q) + '&hl=de&gl=DE&ceid=DE:de',\n      json: false, timeout: 8000\n    });\n    if (typeof rssXml === 'string') {\n      const re = /<item>([\\s\\S]*?)<\\/item>/g;\n      let m; let c = 0;\n      while ((m = re.exec(rssXml)) !== null && c < 8) {\n        const si = m[1].indexOf('http');\n        const ei = si >= 0 ? m[1].indexOf('<', si) : -1;\n        const url = si >= 0 && ei > si ? m[1].slice(si, ei).trim() : '';\n        if (!url || url.includes('news.google.com')) { c++; continue; }\n        const ti = m[1].indexOf('<title>'); const te = m[1].indexOf('</title>');\n        const title = ti >= 0 && te > ti ? m[1].slice(ti + 7, te).replace(/<[^>]+>/g, '').trim() : '';\n        if (!seenUrls.has(url)) { seenUrls.add(url); allPages.push({ url, title, snippet: '' }); c++; }\n      }\n    }\n  } catch (e) {}\n}\n\nif (allPages.length === 0) return [{ json: { error: 'Keine Suchergebnisse gefunden' } }];\nreturn [{ json: { pages: allPages, kategorie: kat, anthropic_api_key: config.anthropic_api_key, brave_api_key: braveKey } }];"
+      },
+      "id": "92e6958f-6ea0-49ec-aefb-dc72264ee4d8",
+      "name": "Multi-Suche Brave + RSS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2048,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nif (input.error) return [{ json: input }];\n\nconst pages = input.pages || [];\nconst scrapedPages = [];\nconst skippedPages = [];\n\nfor (const page of pages) {\n  if (!page.url) { skippedPages.push({ url: '', title: page.title || '', reason: 'Keine URL' }); continue; }\n  try {\n    let html = await this.helpers.httpRequest({ method: 'GET', url: page.url, encoding: 'utf-8', timeout: 10000, json: false });\n    if (typeof html !== 'string') html = String(html);\n    const text = html\n      .replace(/<script[^>]*>[\\s\\S]*?<\\/script>/gi, '')\n      .replace(/<style[^>]*>[\\s\\S]*?<\\/style>/gi, '')\n      .replace(/<[^>]+>/g, ' ')\n      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')\n      .replace(/&ouml;/g, 'oe').replace(/&Ouml;/g, 'Oe')\n      .replace(/&auml;/g, 'ae').replace(/&Auml;/g, 'Ae')\n      .replace(/&uuml;/g, 'ue').replace(/&Uuml;/g, 'Ue')\n      .replace(/&szlig;/g, 'ss').replace(/\\s+/g, ' ').trim().substring(0, 15000);\n    if (text.length > 200) {\n      scrapedPages.push({ url: page.url, title: page.title || '', text });\n    } else {\n      skippedPages.push({ url: page.url, title: page.title || '', reason: `Zu wenig Text (${text.length} Zeichen)` });\n    }\n  } catch (e) {\n    skippedPages.push({ url: page.url, title: page.title || '', reason: e.message || String(e) });\n  }\n}\n\nif (scrapedPages.length === 0) {\n  return [{ json: { error: 'Keine Seiten geladen', total_input_pages: pages.length, scraped_count: 0, skipped_count: skippedPages.length, skipped_pages: skippedPages } }];\n}\nreturn [{ json: { total_input_pages: pages.length, scraped_count: scrapedPages.length, skipped_count: skippedPages.length, scraped_pages: scrapedPages, skipped_pages: skippedPages, kategorie: input.kategorie, anthropic_api_key: input.anthropic_api_key, brave_api_key: input.brave_api_key } }];"
+      },
+      "id": "0c9be319-fc24-4734-80c8-691cc2481d29",
+      "name": "Gewinner-Seiten scrapen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1824,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nif (input.error) return [{ json: input }];\n\nconst pages = input.scraped_pages || [];\nconst apiKey = input.anthropic_api_key;\nconst braveApiKey = input.brave_api_key;\n\nlet prompt = 'Du analysierst Webseiten die Preistraeger von Wirtschaftspreisen auflisten.\\n';\nprompt += 'Kategorie: ' + input.kategorie + '\\n\\n';\nprompt += 'AUFGABE: Extrahiere ALLE preisgekroenten UNTERNEHMEN.\\n\\n';\nprompt += 'Fuer jedes Unternehmen extrahiere GENAU 3 Felder:\\n';\nprompt += '- name: Offizieller Firmenname mit Rechtsform (z.B. Mustermann GmbH)\\n';\nprompt += '- preis: Exakter Name des gewonnenen Preises\\n';\nprompt += '- website: Nur die Firmen-Website wenn EXPLIZIT im Text. Sonst leerer String. NIEMALS erfinden.\\n\\n';\nprompt += 'REGELN: NUR Firmen (keine Verbaende/Stiftungen), keine Duplikate, mind. 50 Unternehmen\\n';\nprompt += 'Format: [{\"name\": \"Firma GmbH\", \"preis\": \"Preisname 2025\", \"website\": \"\"}]\\n\\n';\nprompt += '--- WEBSEITEN-TEXTE ---\\n\\n';\n\nfor (const page of pages) {\n  prompt += '=== ' + page.title + ' ===\\n';\n  prompt += page.text.substring(0, 12000) + '\\n\\n';\n}\n\ntry {\n  const response = await this.helpers.httpRequest({\n    method: 'POST', url: 'https://api.anthropic.com/v1/messages',\n    headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },\n    body: { model: 'claude-haiku-4-5-20251001', max_tokens: 8192, messages: [{ role: 'user', content: prompt }] },\n    json: true, timeout: 180000\n  });\n  let text = (response.content && response.content[0]) ? response.content[0].text : '';\n  let companies = [];\n  try {\n    const match = text.match(/\\[[\\s\\S]*\\]/);\n    if (match) companies = JSON.parse(match[0]);\n  } catch (e) { return [{ json: { error: 'JSON Parse Fehler', raw: text.substring(0, 2000) } }]; }\n\n  const seen = new Set();\n  const unique = [];\n  for (const c of companies) {\n    const key = (c.name || '').toLowerCase().trim();\n    if (key && !seen.has(key)) { seen.add(key); unique.push(c); }\n  }\n  if (unique.length === 0) return [{ json: { error: 'Keine Unternehmen gefunden', raw: text.substring(0, 2000) } }];\n\n  return unique.slice(0, 100).map(c => ({\n    json: {\n      name: c.name || '',\n      preis: c.preis || '',\n      website: (c.website && c.website.length > 3) ? c.website : '',\n      brave_api_key: braveApiKey,\n      anthropic_api_key: apiKey\n    }\n  }));\n} catch (e) {\n  return [{ json: { error: 'Claude API Fehler: ' + (e.message || String(e)) } }];\n}"
+      },
+      "id": "16f7a10c-18c1-42cb-9aba-ae9c6766ac38",
+      "name": "KI - Unternehmen extrahieren",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1600,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst results = [];\n\nfunction normalizeUrl(raw) {\n  if (!raw) return '';\n  if (/^https?:\\/\\//i.test(raw)) return raw;\n  return `https://${raw}`;\n}\n\nfunction buildQuery(name) {\n  const clean = name.replace(/\\s+/g, ' ').trim();\n  const stripped = clean\n    .replace(/\\b(GmbH|UG|AG|KG|SE|mbH|LTD|LLC|INC)\\b/gi, '')\n    .replace(/\\s+/g, ' ')\n    .trim();\n\n  return `${stripped || clean} impressum`;\n}\n\nasync function searchBrave(query, apiKey) {\n  return await this.helpers.httpRequest({\n    method: 'GET',\n    url: 'https://api.search.brave.com/res/v1/web/search',\n    headers: {\n      Accept: 'application/json',\n      'Accept-Encoding': 'gzip',\n      'X-Subscription-Token': apiKey,\n    },\n    qs: {\n      q: query,\n      count: 5, // reicht völlig → spart Kosten\n      country: 'DE',\n      search_lang: 'de',\n    },\n    json: true,\n  });\n}\n\nfor (const inputItem of items) {\n  const item = inputItem.json;\n  let website = (item.website || '').trim();\n\n  const debug = {\n    query: null,\n    picked: null,\n    error: null\n  };\n\n  if (!website && item.name && item.brave_api_key) {\n    try {\n      const query = buildQuery(item.name);\n      debug.query = query;\n\n      const res = await searchBrave.call(this, query, item.brave_api_key);\n      const br = res?.web?.results || [];\n\n      // Nimm einfach den ersten Treffer mit URL\n      const first = br.find(r => r?.url || r?.link);\n\n      if (first) {\n        const raw = first.url || first.link;\n        website = normalizeUrl(raw); // <-- HIER bleibt die Impressum-URL komplett erhalten\n\n        debug.picked = {\n          title: first.title,\n          url: website\n        };\n      }\n    } catch (e) {\n      debug.error = e.message;\n    }\n  }\n\n  results.push({\n    json: {\n      name: item.name,\n      website,\n      debug\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "e0f4c190-207e-4a59-9fd6-2ffd16a12e19",
+      "name": "1. Brave Website Lookup",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -944,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Schritt 5: E-Mail aus Impressum / Kontakt extrahieren\n\nconst items = $input.all();\n\nfunction safeItems(nodeName) {\n  try {\n    return $items(nodeName);\n  } catch (e) {\n    return [];\n  }\n}\n\n// Falls dein Node anders heißt, hier anpassen\nconst braveItems =\n  safeItems('Brave Website Lookup').length\n    ? safeItems('Brave Website Lookup')\n    : safeItems('1. Brave Website Lookup');\n\nconst priceSourceNodes = [\n  'KI - Unternehmen extrahieren',\n  'Gewinner-Seiten scrapen',\n  'Multi-Suche Brave + RSS',\n  'Konfiguration2',\n  'Batch Loop (10 Firmen)',\n];\n\nconst emailRegex = /[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}/g;\n\nconst badDomains = [\n  'example.com',\n  'wixpress.com',\n  'sentry.io',\n  'webpack',\n  'cloudflare.com',\n  'w3.org',\n  'schema.org',\n  'googleapis.com',\n  'jquery.com',\n  'bootstrapcdn.com',\n  'fontawesome.com',\n  'wordpress.org',\n  'gravatar.com',\n  'noreply',\n  'no-reply',\n  'unsubscribe',\n  'mailer-daemon',\n  'cookiebot.com',\n  'usercentrics.com',\n  'tracking',\n  'pixel',\n  'cdn',\n  'placeholder',\n  'github.com',\n  'npmjs.com',\n  'gstatic.com',\n  'google.com',\n  'googleusercontent.com',\n  'doubleclick.net',\n  'googletagmanager.com',\n  'google-analytics.com',\n  'fonts.gstatic.com',\n  'fonts.googleapis.com',\n];\n\nconst prio = [\n  'info@',\n  'kontakt@',\n  'contact@',\n  'office@',\n  'mail@',\n  'hello@',\n  'post@',\n  'service@',\n  'team@',\n];\n\nfunction decode(str) {\n  if (!str) return '';\n  return String(str)\n    .replace(/&#(\\d+);/g, (_, c) => String.fromCharCode(parseInt(c, 10)))\n    .replace(/&#x([0-9a-fA-F]+);/g, (_, c) => String.fromCharCode(parseInt(c, 16)))\n    .replace(/&commat;/gi, '@')\n    .replace(/&period;/gi, '.')\n    .replace(/&dot;/gi, '.')\n    .replace(/&nbsp;/gi, ' ')\n    .replace(/&amp;/gi, '&')\n    .replace(/&quot;/gi, '\"')\n    .replace(/&#64;/g, '@');\n}\n\nfunction htmlToText(html) {\n  if (!html) return '';\n  let s = String(html);\n\n  // harte Störer raus\n  s = s.replace(/<script[\\s\\S]*?<\\/script>/gi, ' ');\n  s = s.replace(/<style[\\s\\S]*?<\\/style>/gi, ' ');\n  s = s.replace(/<noscript[\\s\\S]*?<\\/noscript>/gi, ' ');\n  s = s.replace(/<svg[\\s\\S]*?<\\/svg>/gi, ' ');\n  s = s.replace(/<head[\\s\\S]*?<\\/head>/gi, ' ');\n\n  // Tags entfernen\n  s = s.replace(/<[^>]+>/g, ' ');\n\n  // Entities / Whitespaces\n  s = decode(s);\n  s = s.replace(/\\s+/g, ' ').trim();\n\n  return s;\n}\n\nfunction cleanEmail(e) {\n  return String(e || '')\n    .replace(/^mailto:/i, '')\n    .replace(/[?].*$/, '')\n    .replace(/[<>\"'(),;]+$/g, '')\n    .trim();\n}\n\nfunction getHost(url) {\n  try {\n    return new URL(url).hostname.replace(/^www\\./, '').toLowerCase();\n  } catch (e) {\n    return '';\n  }\n}\n\nfunction toAbsoluteUrl(baseUrl, maybeRelative) {\n  try {\n    return new URL(maybeRelative, baseUrl).href;\n  } catch (e) {\n    return '';\n  }\n}\n\nfunction isBad(email) {\n  const l = String(email || '').toLowerCase();\n  if (!l.includes('@') || l.length > 100) return true;\n\n  if (badDomains.some(d => l.includes(d))) return true;\n  if (['.png', '.jpg', '.jpeg', '.js', '.css', '.svg', '.gif', '.woff', '.map', '.webp'].some(x => l.endsWith(x))) return true;\n\n  const domain = (l.split('@')[1] || '');\n  if (!domain) return true;\n  if (domain.split('.').length < 2) return true;\n\n  return false;\n}\n\nfunction scoreEmail(email, host) {\n  const l = email.toLowerCase();\n  let s = 0;\n\n  for (let i = 0; i < prio.length; i++) {\n    if (l.startsWith(prio[i])) {\n      s += (prio.length - i) * 100;\n      break;\n    }\n  }\n\n  const domain = (l.split('@')[1] || '').replace(/^www\\./, '');\n  if (host && domain === host) s += 80;\n  if (host && domain.endsWith('.' + host)) s += 60;\n\n  if (l.startsWith('datenschutz@') || l.startsWith('privacy@')) s -= 20;\n\n  return s;\n}\n\nfunction extractEmailsFromText(text) {\n  if (!text) return [];\n\n  const t = decode(text);\n\n  const found = new Set();\n\n  // 1) Standard-Mailadressen\n  for (const m of t.matchAll(emailRegex)) {\n    const e = cleanEmail(m[0]);\n    if (e) found.add(e);\n  }\n\n  // 2) mailto:\n  for (const m of t.matchAll(/mailto:([^\\s\"'<>?]+)/gi)) {\n    const e = cleanEmail(m[1]);\n    if (e) found.add(e);\n  }\n\n  // 3) Obfuskationen wie kontakt(at)di-w.de / kontakt [at] di-w.de / kontakt(at) di-w.de\n  const obfPatterns = [\n    /([a-zA-Z0-9._%+\\-]+)\\s*(?:\\(|\\[)?at(?:\\)|\\])?\\s*([a-zA-Z0-9.\\-]+)\\s*(?:\\(|\\[)?dot(?:\\)|\\])?\\s*([a-zA-Z]{2,})/gi,\n    /([a-zA-Z0-9._%+\\-]+)\\s*\\(\\s*at\\s*\\)\\s*([a-zA-Z0-9.\\-]+)\\s*\\.\\s*([a-zA-Z]{2,})/gi,\n    /([a-zA-Z0-9._%+\\-]+)\\s*\\[\\s*at\\s*\\]\\s*([a-zA-Z0-9.\\-]+)\\s*\\[\\s*dot\\s*\\]\\s*([a-zA-Z]{2,})/gi,\n  ];\n\n  for (const re of obfPatterns) {\n    for (const m of t.matchAll(re)) {\n      const e = `${m[1]}@${m[2]}.${m[3]}`;\n      found.add(cleanEmail(e));\n    }\n  }\n\n  return [...found].filter(Boolean);\n}\n\nfunction bestEmailFromHtml(html, host) {\n  if (!html) return '';\n\n  const text = htmlToText(html);\n  const candidates = extractEmailsFromText(text)\n    .filter(e => !isBad(e));\n\n  if (!candidates.length) return '';\n\n  candidates.sort((a, b) => scoreEmail(b, host) - scoreEmail(a, host));\n  return candidates[0] || '';\n}\n\nfunction extractCandidateLinks(html, baseUrl) {\n  if (!html || !baseUrl) return [];\n\n  const text = decode(String(html));\n  const hrefs = [...text.matchAll(/href\\s*=\\s*[\"']([^\"']+)[\"']/gi)].map(m => m[1]);\n\n  const keywords = [\n    'impressum',\n    'kontakt',\n    'contact',\n    'ueber-uns',\n    'über-uns',\n    'about',\n    'datenschutz',\n  ];\n\n  const out = [];\n  for (const href of hrefs) {\n    const lower = href.toLowerCase();\n    if (keywords.some(k => lower.includes(k))) {\n      const abs = toAbsoluteUrl(baseUrl, href);\n      if (abs) out.push(abs);\n    }\n  }\n\n  return [...new Set(out)];\n}\n\nfunction guessCommonPages(baseUrl) {\n  const paths = [\n    '/impressum',\n    '/impressum/',\n    '/kontakt',\n    '/kontakt/',\n    '/contact',\n    '/contact/',\n    '/about',\n    '/about/',\n    '/ueber-uns',\n    '/ueber-uns/',\n    '/datenschutz',\n    '/datenschutz/',\n  ];\n\n  const out = [];\n  for (const p of paths) {\n    try {\n      out.push(new URL(p, baseUrl).href);\n    } catch (e) {}\n  }\n\n  return [...new Set(out)];\n}\n\nasync function fetchHtml(url) {\n  if (!url) return '';\n  try {\n    const res = await this.helpers.httpRequest({\n      method: 'GET',\n      url,\n      headers: {\n        'User-Agent': 'Mozilla/5.0',\n        'Accept': 'text/html,application/xhtml+xml',\n      },\n      timeout: 15000,\n      json: false,\n    });\n    return typeof res === 'string' ? res : String(res || '');\n  } catch (e) {\n    return '';\n  }\n}\n\nasync function resolveEmailFromSite(initialHtml, baseUrl) {\n  const host = getHost(baseUrl);\n\n  // 1) Direkt im HTML\n  let email = bestEmailFromHtml(initialHtml, host);\n  if (email) return email;\n\n  // 2) Kontakt-/Impressumslinks aus dem HTML\n  const candidateUrls = [\n    ...extractCandidateLinks(initialHtml, baseUrl),\n    ...guessCommonPages(baseUrl),\n  ];\n\n  for (const url of [...new Set(candidateUrls)].slice(0, 8)) {\n    const subHtml = await fetchHtml.call(this, url);\n    email = bestEmailFromHtml(subHtml, getHost(url));\n    if (email) return email;\n  }\n\n  return '';\n}\n\nfunction getByNodeIndex(nodeName, i) {\n  try {\n    const arr = $items(nodeName);\n    return arr[i]?.json || {};\n  } catch (e) {\n    return {};\n  }\n}\n\nfunction pickPrice(i, current, brave) {\n  const direct = current.preis ?? current.price ?? brave.preis ?? brave.price;\n  if (direct !== undefined && direct !== null && String(direct).trim() !== '') return direct;\n\n  for (const nodeName of priceSourceNodes) {\n    const x = getByNodeIndex(nodeName, i);\n    const candidate = x.preis ?? x.price ?? x.cost ?? x.gebuehr ?? x.gebühren;\n    if (candidate !== undefined && candidate !== null && String(candidate).trim() !== '') {\n      return candidate;\n    }\n  }\n\n  return '';\n}\n\nconst result = [];\n\nfor (let i = 0; i < items.length; i++) {\n  const current = items[i]?.json || {};\n  const brave = braveItems[i]?.json || {};\n  const picked = brave.picked || {};\n\n  const name =\n    current.name ||\n    brave.name ||\n    picked.title ||\n    '';\n\n  const website =\n    current.website ||\n    current.url ||\n    current.impressum_url ||\n    brave.website ||\n    picked.url ||\n    '';\n\n  const preis = pickPrice(i, current, brave);\n\n  const html =\n    current.impressum_html ||\n    current.data ||\n    current.body ||\n    await fetchHtml.call(this, website);\n\n  const email = await resolveEmailFromSite.call(this, html, website);\n\n  result.push({\n    json: {\n      name,\n      preis,\n      website,\n      email,\n    },\n  });\n}\n\nreturn result;"
+      },
+      "id": "d3d15678-419a-4bda-a6e4-010075c50685",
+      "name": "5. E-Mail extrahieren",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -496,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "preistraeger-suche",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "ea1a70d4-84af-4b00-a99c-d690d782ac75",
+      "name": "Webhook1",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -2480,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 5,
+        "options": {}
+      },
+      "id": "8572ab16-497d-48b7-a247-1ac613734252",
+      "name": "Batch Loop (10 Firmen)",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -1344,
+        672
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.website }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -720,
+        688
+      ],
+      "id": "9a026e09-a233-4e6f-a19f-5de25ec58943",
+      "name": "HTTP Request",
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "value": "pgUpA8l4ObAeGFsr",
+          "mode": "list",
+          "cachedResultName": "Outreach DB",
+          "cachedResultUrl": "/projects/wGvTabHb5eTAI5Hg/datatables/pgUpA8l4ObAeGFsr"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Unternehmensname": "={{ $json.name }}",
+            "Preis": "={{ $json.preis }}",
+            "Website": "={{ $json.website }}",
+            "E_Mail": "={{ $json.email }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Unternehmensname",
+              "displayName": "Unternehmensname",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Preis",
+              "displayName": "Preis",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Website",
+              "displayName": "Website",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "E_Mail",
+              "displayName": "E_Mail",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -272,
+        672
+      ],
+      "id": "13fc9b73-6826-4b11-a98b-7c0dbb143337",
+      "name": "Insert row"
+    },
+    {
+      "parameters": {
+        "content": "Old Flow",
+        "height": 480,
+        "width": 1872
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -2720,
+        -64
+      ],
+      "typeVersion": 1,
+      "id": "7c8cd8eb-2d0b-4ed1-9fdc-83abeac700ea",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "path": "outreach_db",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -2496,
+        1200
+      ],
+      "id": "62f03254-1bc6-478c-bf3f-5b9e30cac81b",
+      "name": "Webhook2"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "pgUpA8l4ObAeGFsr",
+          "mode": "list",
+          "cachedResultName": "Outreach DB",
+          "cachedResultUrl": "/projects/wGvTabHb5eTAI5Hg/datatables/pgUpA8l4ObAeGFsr"
+        },
+        "returnAll": true
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -2272,
+        1200
+      ],
+      "id": "f7d35945-577b-4e87-867d-31bab6675b56",
+      "name": "Get row(s)"
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -2048,
+        1200
+      ],
+      "id": "ff6c2608-eba9-4196-b8b1-ee509b3b1876",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "options": {
+          "compression": false,
+          "fileName": "preistraeger_ergebnisse.xlsx",
+          "sheetName": "output"
+        }
+      },
+      "id": "99c5b7f6-a2a6-4c9c-b151-8129fde677d6",
+      "name": "Excel-Datei erstellen",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        -704,
+        496
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "binary",
+        "responseDataSource": "set",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -464,
+        464
+      ],
+      "id": "8f1a32a5-d4d1-4b53-8b59-4dfb8721e195",
+      "name": "Respond to Webhook1"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f347f44a-6e96-4ae6-ba80-3abcf3dee603",
+              "name": "Unternehmensname",
+              "value": "={{ $json.Unternehmensname }}",
+              "type": "string"
+            },
+            {
+              "id": "a77b626b-affb-4779-beb8-1e4aa97d54be",
+              "name": "Preis",
+              "value": "={{ $json.Preis }}",
+              "type": "string"
+            },
+            {
+              "id": "d92e4107-f0a1-4e6e-b4ae-5a5456a6fddd",
+              "name": "Website",
+              "value": "={{ $json.Website }}",
+              "type": "string"
+            },
+            {
+              "id": "0d65a820-7548-495a-bbd9-9ac50d933b67",
+              "name": "E_Mail",
+              "value": "={{ $json.E_Mail }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -1008,
+        496
+      ],
+      "id": "d5eed18e-7f47-45e0-82e2-9547e2d037b4",
+      "name": "Edit Fields"
+    }
+  ],
+  "connections": {
+    "Konfiguration5": {
+      "main": [
+        [
+          {
+            "node": "Multi-Suche (5x SerpAPI)5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gewinner-Seiten scrapen5": {
+      "main": [
+        [
+          {
+            "node": "KI - Unternehmen extrahieren5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "KI - Unternehmen extrahieren5": {
+      "main": [
+        [
+          {
+            "node": "Batch Loop (10 Firmen)2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Batch Loop (10 Firmen)2": {
+      "main": [
+        [
+          {
+            "node": "Excel-Datei erstellen4",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP Request1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request1": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Batch Loop (10 Firmen)2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Multi-Suche (5x SerpAPI)5": {
+      "main": [
+        [
+          {
+            "node": "Gewinner-Seiten scrapen5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Konfiguration": {
+      "main": [
+        [
+          {
+            "node": "Multi-Suche Brave + RSS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Multi-Suche Brave + RSS": {
+      "main": [
+        [
+          {
+            "node": "Gewinner-Seiten scrapen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gewinner-Seiten scrapen": {
+      "main": [
+        [
+          {
+            "node": "KI - Unternehmen extrahieren",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "KI - Unternehmen extrahieren": {
+      "main": [
+        [
+          {
+            "node": "Batch Loop (10 Firmen)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "1. Brave Website Lookup": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "5. E-Mail extrahieren": {
+      "main": [
+        [
+          {
+            "node": "Insert row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook1": {
+      "main": [
+        [
+          {
+            "node": "Konfiguration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Batch Loop (10 Firmen)": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "1. Brave Website Lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "5. E-Mail extrahieren",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook2": {
+      "main": [
+        [
+          {
+            "node": "Get row(s)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get row(s)": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert row": {
+      "main": [
+        [
+          {
+            "node": "Batch Loop (10 Firmen)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Excel-Datei erstellen": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond to Webhook1": {
+      "main": [
+        []
+      ]
+    },
+    "Edit Fields": {
+      "main": [
+        [
+          {
+            "node": "Excel-Datei erstellen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  }
+}
