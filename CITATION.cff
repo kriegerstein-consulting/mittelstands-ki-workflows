@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "Wenn Sie diese Artefakte verwenden, zitieren Sie sie bitte wie folgt."
+title: "Workflow-Definitionen und Prototypen zu 'End-to-End AI-Workflow-Automatisierung im deutschen Mittelstand'"
+authors:
+  - family-names: Himmelstein
+    given-names: Noah
+  - family-names: Krieger
+    given-names: Finn
+type: software
+license: MIT
+version: 1.0.0
+date-released: 2026-08-06
