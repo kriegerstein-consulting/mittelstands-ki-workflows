@@ -16,7 +16,7 @@ n8n-Workflows als importierbare JSON-Exporte. Es handelt sich um
 | `fall-b_newsletter-generator_url-freitext.json` | B | URLs und Freitext → strukturierter Newsletter (DOCX) + LinkedIn-Beitrag | n8n, Anthropic API, Mistral (OCR) |
 | `fall-b_newsletter-generator_pdf.json` | B | PDF-Quellen → Newsletter + LinkedIn-Beitrag | n8n, Anthropic API, Mistral (OCR) |
 | `fall-e_wissensagent_sprachinterview.json` | E | Transkript eines sprachbasierten KI-Interviews → How-To-Dokumentation im Word-Format | n8n, Vapi, Anthropic API |
-| `fall-e_wissensagent_bildschirmaufnahme.json` | E | Bildschirmaufnahme einer Tätigkeit → strukturierte Schritt-für-Schritt-Doku mit Zeitstempeln | n8n, Google Gemini API |
+
 
 ## Import
 
